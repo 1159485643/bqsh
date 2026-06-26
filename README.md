@@ -1,25 +1,16 @@
 # 明星同款舆情风险复审 V3
 
-## 已检查内容
+本版按反馈修复：
 
-- 单个前端页面：public/index.html
-- 飞书授权登录在当前页面窗口输入 App ID / App Secret
-- 授权时自动携带 scope：
-  - wiki:node:read
-  - sheets:spreadsheet
-- 数据源设置只保留：
-  - 飞书链接
-  - 处理人姓名
-- 以下字段固定，不支持修改：
-  - 处理人
-  - 审核状态
-  - 审核备注
-  - 审核时间
-- 读取整张表，不在页面设置最大行数
-- 后端分块读取，每次 500 行，避免飞书 10MB 限制
-- 支持标准 Sheets 链接和 Wiki 中的 Sheets 链接解析
+1. 图片/社区链接/外网链接读取增强：支持普通 URL、JSON、富文本对象、IMAGE() 公式。
+2. 领取任务不再自动重新加载全表，只写回领取结果并更新当前页面记录。
+3. 写回增加原始行号兜底，避免“没有行号”。
+4. 同步数据源读取全部数据，不再按处理人过滤；处理人只作为筛选项。
+5. 去掉开头内嵌数据读取流程，默认空页面，需点击“同步数据源”。
+6. 去掉“清空进度”按钮。
+7. 保留原 UI、图片预览、不通过快捷原因、不通过原因不能为空校验。
+8. 顶部筛选保留“处理人”。
 
-## Cloudflare Pages
-
-Build command：留空  
-Build output directory：public
+Cloudflare Pages：
+- Build command 留空
+- Build output directory 填 public

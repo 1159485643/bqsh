@@ -29,35 +29,25 @@ export async function onRequestPost({ request }) {
     }
 
     if (action === "claim") {
-      const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId);
-      const handlerCol = ensureHeader(headers, "处理人");
-      const statusCol = ensureHeader(headers, "审核状态");
-
-      let claimed = 0;
-      for (const row of rows) {
-        if (claimed >= Number(count || 20)) break;
-        const h = String(row["处理人"] || "").trim();
-        const s = String(row["审核状态"] || "").trim();
-        if (!h && (!s || s === "待审核" || s === "未复审")) {
-          await updateCells(accessToken, meta.spreadsheetToken, sheetId, row.__rowIndex, {
-            [handlerCol]: config.handlerName || "",
-            [statusCol]: s || "待审核"
-          });
-          claimed++;
-        }
-      }
-      return json({ ok:true, count:claimed });
+      const result = await claimRows(accessToken, meta.spreadsheetToken, sheetId, config.handlerName || "", Number(count || 20));
+      return json({ ok:true, count:result.rows.length, rows:result.rows });
     }
 
     if (action === "update") {
+      const rowIndex = getRecordRowIndex(record);
+      if (!rowIndex) throw new Error("缺少原始行号，请先点击“同步数据源”后再审核");
+
       const { headers } = await readHeaders(accessToken, meta.spreadsheetToken, sheetId);
+      await ensureHeaderRow(accessToken, meta.spreadsheetToken, sheetId, headers, ["处理人", "审核状态", "审核备注", "审核时间"]);
+
+      const status = normalizeReviewStatus(record?.reviewStatus);
       const cells = {};
-      cells[ensureHeader(headers, "处理人")] = record.handler || config.handlerName || "";
-      cells[ensureHeader(headers, "审核状态")] = record.status || "待审核";
-      cells[ensureHeader(headers, "审核备注")] = record.reason || "";
-      cells[ensureHeader(headers, "审核时间")] = record.reviewTime || "";
-      await updateCells(accessToken, meta.spreadsheetToken, sheetId, record._rowIndex, cells);
-      return json({ ok:true });
+      cells[ensureHeader(headers, "处理人")] = config.handlerName || record?.handlerName || record?.raw?.["处理人"] || "";
+      cells[ensureHeader(headers, "审核状态")] = status;
+      cells[ensureHeader(headers, "审核备注")] = record?.reviewReason || "";
+      cells[ensureHeader(headers, "审核时间")] = record?.reviewTime || "";
+      await updateCells(accessToken, meta.spreadsheetToken, sheetId, rowIndex, cells);
+      return json({ ok:true, rowIndex });
     }
 
     return json({ ok:false, message:"未知 action" }, 400);
@@ -189,6 +179,21 @@ async function getFirstSheetId(accessToken, spreadsheetToken){
   return data.data?.sheets?.[0]?.sheet_id || data.data?.sheets?.[0]?.sheetId || "";
 }
 
+function normalizeCellValue(cell){
+  if (cell == null) return "";
+  if (typeof cell === "string" || typeof cell === "number" || typeof cell === "boolean") return String(cell);
+  if (Array.isArray(cell)) return cell.map(normalizeCellValue).filter(Boolean).join("\n");
+  if (typeof cell === "object") {
+    const parts = [];
+    for (const key of ["text", "value", "url", "href", "link", "image_url", "imageUrl", "src"]) {
+      if (cell[key] != null) parts.push(normalizeCellValue(cell[key]));
+    }
+    if (parts.length) return parts.filter(Boolean).join(" ");
+    try { return JSON.stringify(cell); } catch(e) { return String(cell); }
+  }
+  return String(cell);
+}
+
 async function readHeaders(accessToken, spreadsheetToken, sheetId){
   const range = `${sheetId}!A1:ZZ1`;
   const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
@@ -196,60 +201,146 @@ async function readHeaders(accessToken, spreadsheetToken, sheetId){
   const data = await res.json();
   if (data.code !== 0) throw new Error(`读取表头失败：${data.msg || data.code}`);
   const values = data.data?.valueRange?.values || [];
-  return { headers:(values[0] || []).map(v => String(v || "").trim()) };
+  return { headers:(values[0] || []).map(v => normalizeCellValue(v).trim()) };
+}
+
+async function readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef){
+  const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
+  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
+  const data = await res.json();
+  const msg = String(data.msg || data.message || "");
+  if (data.code !== 0 && /exceeded|10485760|too large/i.test(msg) && pageSizeRef.value > 50) {
+    pageSizeRef.value = Math.max(50, Math.floor(pageSizeRef.value / 2));
+    return { retry:true };
+  }
+  if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
+  return { retry:false, values:data.data?.valueRange?.values || [] };
 }
 
 async function readAll(accessToken, spreadsheetToken, sheetId){
-  const pageSize = 500;
-  let start = 1;
-  let allValues = [];
+  const headerResult = await readHeaders(accessToken, spreadsheetToken, sheetId);
+  const headers = headerResult.headers || [];
+  const rows = [];
+  let start = 2;
+  const pageSizeRef = { value:500 };
   let emptyBlocks = 0;
 
   while (true) {
-    const end = start + pageSize - 1;
+    const end = start + pageSizeRef.value - 1;
     const range = `${sheetId}!A${start}:ZZ${end}`;
-    const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
+    const result = await readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef);
+    if (result.retry) continue;
 
-    const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
-    const data = await res.json();
+    const values = result.values || [];
+    const nonEmptyRows = [];
 
-    if (data.code !== 0) {
-      throw new Error(`读取表格失败：${data.msg || data.code}`);
-    }
+    values.forEach((r, i) => {
+      const normalized = (r || []).map(normalizeCellValue);
+      const hasContent = normalized.some(cell => String(cell ?? "").trim() !== "");
+      if (!hasContent) return;
+      const obj = { __rowIndex:start + i };
+      headers.forEach((h, idx)=>{ if(h) obj[h] = normalized[idx] ?? ""; });
+      nonEmptyRows.push(obj);
+    });
 
-    const values = data.data?.valueRange?.values || [];
-    const hasContent = values.some(row =>
-      (row || []).some(cell => String(cell ?? "").trim() !== "")
-    );
-
-    if (!hasContent) {
+    if (!nonEmptyRows.length) {
       emptyBlocks++;
       if (emptyBlocks >= 2) break;
     } else {
       emptyBlocks = 0;
-      allValues = allValues.concat(values);
+      rows.push(...nonEmptyRows);
     }
 
-    if (values.length < pageSize) break;
-    start += pageSize;
+    if (values.length < pageSizeRef.value) break;
+    start += pageSizeRef.value;
 
     if (start > 200000) {
       throw new Error("读取行数超过 200000，请检查表格是否存在大量空白格式区域");
     }
   }
 
-  const headers = (allValues[0] || []).map(v => String(v || "").trim());
-  const rows = allValues.slice(1).map((r, i) => {
-    const obj = { __rowIndex:i+2 };
-    headers.forEach((h, idx)=>{ if(h) obj[h] = r[idx] ?? ""; });
-    return obj;
-  }).filter(row =>
-    Object.keys(row).some(k =>
-      k !== "__rowIndex" && String(row[k] || "").trim() !== ""
-    )
-  );
-
   return { headers, rows };
+}
+
+async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, count){
+  if (!handlerName) throw new Error("处理人姓名不能为空");
+
+  const { headers } = await readHeaders(accessToken, spreadsheetToken, sheetId);
+  await ensureHeaderRow(accessToken, spreadsheetToken, sheetId, headers, ["处理人", "审核状态"]);
+
+  const handlerCol = ensureHeader(headers, "处理人");
+  const statusCol = ensureHeader(headers, "审核状态");
+  const claimed = [];
+
+  let start = 2;
+  const pageSizeRef = { value:250 };
+  let emptyBlocks = 0;
+
+  while (claimed.length < count) {
+    const end = start + pageSizeRef.value - 1;
+    const range = `${sheetId}!A${start}:ZZ${end}`;
+    const result = await readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef);
+    if (result.retry) continue;
+
+    const values = result.values || [];
+    let blockHasContent = false;
+
+    for (let i = 0; i < values.length && claimed.length < count; i++) {
+      const rowIndex = start + i;
+      const normalized = (values[i] || []).map(normalizeCellValue);
+      const hasContent = normalized.some(cell => String(cell ?? "").trim() !== "");
+      if (!hasContent) continue;
+
+      blockHasContent = true;
+      const handler = String(normalized[handlerCol - 1] || "").trim();
+      const status = String(normalized[statusCol - 1] || "").trim();
+
+      if (!handler && (!status || status === "待审核" || status === "未复审")) {
+        await updateCells(accessToken, spreadsheetToken, sheetId, rowIndex, {
+          [handlerCol]: handlerName,
+          [statusCol]: status || "待审核"
+        });
+        claimed.push(rowIndex);
+      }
+    }
+
+    if (!blockHasContent) {
+      emptyBlocks++;
+      if (emptyBlocks >= 2) break;
+    } else {
+      emptyBlocks = 0;
+    }
+
+    if (values.length < pageSizeRef.value) break;
+    start += pageSizeRef.value;
+
+    if (start > 200000) break;
+  }
+
+  return { rows:claimed };
+}
+
+function normalizeReviewStatus(status){
+  const text = String(status || "").trim();
+  if (text === "approved" || text === "通过") return "通过";
+  if (text === "rejected" || text === "不通过") return "不通过";
+  return text || "待审核";
+}
+
+function getRecordRowIndex(record){
+  const candidates = [
+    record?.remoteRowIndex,
+    record?._rowIndex,
+    record?.__rowIndex,
+    record?.raw?.__rowIndex
+  ];
+  for (const item of candidates) {
+    const n = Number(item);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const rowIndex = Number(record?.rowIndex);
+  if (Number.isFinite(rowIndex) && rowIndex >= 0) return rowIndex + 2;
+  return 0;
 }
 
 function ensureHeader(headers, name){
@@ -259,6 +350,18 @@ function ensureHeader(headers, name){
     idx = headers.length - 1;
   }
   return idx + 1;
+}
+
+async function ensureHeaderRow(accessToken, spreadsheetToken, sheetId, headers, names){
+  const cells = {};
+  for (const name of names) {
+    const existed = headers.includes(name);
+    const col = ensureHeader(headers, name);
+    if (!existed) cells[col] = name;
+  }
+  if (Object.keys(cells).length) {
+    await updateCells(accessToken, spreadsheetToken, sheetId, 1, cells);
+  }
 }
 
 function colName(n){

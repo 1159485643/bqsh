@@ -1314,7 +1314,7 @@
     <header class="toolbar">
         <div>
             <h1>明星同款舆情风险复审</h1>
-            <div class="subtitle" id="source-label">数据源：file_14164687_1_1782395404064_77_.xlsx</div>
+            <div class="subtitle" id="source-label">数据源：未同步</div>
         </div>
         <div class="actions">
             <button class="btn" id="btn-feishu-login" type="button">飞书授权登录</button>
@@ -1326,7 +1326,6 @@
             <label class="btn" for="file-input">导入文件</label>
             <input id="file-input" type="file" accept=".ndjson,.json,.txt,.csv,.xls" hidden>
             <button class="btn" id="btn-export-xls" type="button">导出 Excel (.xls)</button>
-            <button class="btn" id="btn-clear-progress" type="button">清空进度</button>
         </div>
     </header>
 
@@ -1535,10 +1534,7 @@
             </div>
         </div>
     </div>
-
-    <script type="text/plain" id="embedded-risk-review-data" data-encoding="gzip-base64"></script>
-
-    <script>
+<script>
     (function () {
         'use strict';
 
@@ -1755,14 +1751,19 @@
         }
 
         function saveDataSourceSettings() {
+            const oldConfig = readFeishuConfig();
             const url = document.getElementById('feishu-url-input');
             const handler = document.getElementById('handler-name-input');
             const count = document.getElementById('claim-count');
+            const urlValue = url ? url.value.trim() : '';
+            const handlerValue = handler ? handler.value.trim() : '';
             const config = writeFeishuConfig({
-                feishuUrl: url ? url.value.trim() : '',
-                handlerName: handler ? handler.value.trim() : '',
-                claimCount: count ? count.value.trim() || '20' : '20',
+                feishuUrl: urlValue || oldConfig.feishuUrl || '',
+                handlerName: handlerValue || oldConfig.handlerName || '',
+                claimCount: count ? count.value.trim() || oldConfig.claimCount || '20' : (oldConfig.claimCount || '20'),
             });
+            if (url && config.feishuUrl) url.value = config.feishuUrl;
+            if (handler && config.handlerName) handler.value = config.handlerName;
             return config;
         }
 
@@ -1804,15 +1805,24 @@
             showLoading('正在同步飞书数据，请稍候...', '0%');
             try {
                 const data = await feishuSheetApi('get');
-                const rows = (data.rows || []).filter(row => handlerMatches(row[FEISHU_FIXED_FIELDS.handler], config.handlerName));
+                const rows = data.rows || [];
                 localStorage.removeItem(STORAGE_KEY);
                 setRecords(rows, false);
-                setText('source-label', `数据源：飞书 / ${config.handlerName || '未设置处理人'} / ${rows.length} 条`);
+                setText('source-label', `数据源：飞书 / 全部数据 / ${rows.length} 条`);
             } catch (error) {
                 alert('同步失败：\n' + error.message);
             } finally {
                 hideLoading();
             }
+        }
+
+        function getRemoteRowIndex(record) {
+            if (!record) return 0;
+            const raw = record.raw || {};
+            const value = Number(record.remoteRowIndex || record.__rowIndex || raw.__rowIndex || raw.remoteRowIndex || raw.remote_row_index || 0);
+            if (Number.isFinite(value) && value > 0) return value;
+            if (Number.isFinite(record.rowIndex)) return Number(record.rowIndex) + 2;
+            return 0;
         }
 
         async function claimFeishuTasks() {
@@ -1827,22 +1837,40 @@
             }
             const countEl = document.getElementById('claim-count');
             const count = Math.max(1, Number(countEl ? countEl.value : config.claimCount || 20) || 20);
-            showLoading('正在领取任务，请稍候...', '0%');
+            const btn = document.getElementById('btn-claim-task');
+            if (btn) btn.disabled = true;
             try {
                 const data = await feishuSheetApi('claim', { count });
+                const claimedRows = new Set((data.rows || []).map(v => Number(v)).filter(Boolean));
+                if (claimedRows.size) {
+                    records.forEach(record => {
+                        if (claimedRows.has(getRemoteRowIndex(record))) {
+                            record.handlerName = config.handlerName;
+                            if (record.raw) record.raw[FEISHU_FIXED_FIELDS.handler] = config.handlerName;
+                        }
+                    });
+                    filteredRecords = null;
+                    lastFiltersCache = '';
+                    populateFilters();
+                    render(true);
+                }
                 alert(`领取完成：${data.count || 0} 条`);
-                await syncFeishuData();
             } catch (error) {
                 alert('领取失败：\n' + error.message);
             } finally {
-                hideLoading();
+                if (btn) btn.disabled = false;
             }
         }
 
         async function syncReviewToFeishu(record) {
-            if (!record || !record.remoteRowIndex) return;
+            if (!record) return;
             const config = readFeishuConfig();
             if (!config.feishuUrl) return;
+            record.remoteRowIndex = getRemoteRowIndex(record);
+            if (!record.remoteRowIndex) {
+                alert('写回飞书失败：缺少原始行号，请先点击“同步数据源”后再审核');
+                return;
+            }
             try {
                 await feishuSheetApi('update', { record });
             } catch (error) {
@@ -1863,26 +1891,55 @@
                 .replace(/&#39;/g, "'");
         }
 
-        function splitImageUrls(value) {
-            if (!value) return [];
-            if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean);
-            const text = String(value).trim();
-            if (!text) return [];
-            if (text.charCodeAt(0) === 91) { // '['
+        function collectUrls(value, result = []) {
+            if (value == null) return result;
+            if (Array.isArray(value)) {
+                value.forEach(item => collectUrls(item, result));
+                return result;
+            }
+            if (typeof value === 'object') {
+                ['url', 'href', 'link', 'text', 'value', 'image_url', 'imageUrl', 'src'].forEach(key => {
+                    if (value[key] != null) collectUrls(value[key], result);
+                });
+                return result;
+            }
+
+            let text = decodeHtml(String(value || '').trim());
+            if (!text) return result;
+            text = text.replace(/\\\//g, '/');
+
+            if (text[0] === '[' || text[0] === '{') {
                 try {
-                    const parsed = JSON.parse(text);
-                    if (Array.isArray(parsed)) return parsed.map(String).map(s => s.trim()).filter(Boolean);
+                    collectUrls(JSON.parse(text), result);
                 } catch (error) {}
             }
-            const parts = text.split(/[\n\r,;，；\s]+/);
-            const res = [];
-            for (let i = 0; i < parts.length; i++) {
-                const s = parts[i].trim();
-                if (s && (s.startsWith('http://') || s.startsWith('https://'))) {
-                    res.push(s);
-                }
-            }
-            return res;
+
+            const imageFormula = text.match(/IMAGE\s*\(\s*["']([^"']+)["']/i);
+            if (imageFormula) result.push(imageFormula[1]);
+
+            const matches = text.match(/https?:\/\/[^\s"'<>，；,;、)）\]}]+/g);
+            if (matches) matches.forEach(url => result.push(url.trim()));
+            return result;
+        }
+
+        function uniqueCleanUrls(urls) {
+            const seen = new Set();
+            return (urls || []).map(url => String(url || '').trim())
+                .map(url => url.replace(/[，,;；。]+$/g, ''))
+                .filter(url => /^https?:\/\//i.test(url))
+                .filter(url => {
+                    if (seen.has(url)) return false;
+                    seen.add(url);
+                    return true;
+                });
+        }
+
+        function splitImageUrls(value) {
+            return uniqueCleanUrls(collectUrls(value));
+        }
+
+        function firstUrl(value) {
+            return splitImageUrls(value)[0] || '';
         }
 
         function firstPresent(row, fields) {
@@ -1927,7 +1984,8 @@
 
         const LABEL_APPLY_ID_FIELDS = ['label_applyId', 'label_apply_id', 'open_label_apply_id', 'openLabelApplyId', '标签审核ID', '标签审核主键'];
         const PRE_AUDIT_SCORE_FIELDS = ['pre_audit_score', 'AI预评分', 'AI预评分(pre_audit_score)', 'ai_pre_score', 'preAuditScore'];
-        const SPEC_FIRST_IMAGE_FIELDS = ['规格首图', 'spec_first_image', 'spec_first_images', 'specFirstImage', 'specFirstImages', 'cspu_img_urls'];
+        const IMAGE_FIELDS = ['送审图片', 'pics', 'reported_pic', 'image_urls', 'imageUrls', 'images', '图片', '主图', '商品图片'];
+        const SPEC_FIRST_IMAGE_FIELDS = ['规格首图', 'spec_first_image', 'spec_first_images', 'specFirstImage', 'specFirstImages', 'cspu_img_urls', '规格图'];
         const REVIEW_STATE_FIELDS = new Set([
             'review_status',
             'reviewStatus',
@@ -2003,12 +2061,12 @@
                 sameStyleLabel: String(row.label_name || row['明星同款'] || '').trim(),
                 starName: cleanSameStyleName(row.label_name || row['明星同款'] || ''),
                 applyType: String(row.apply_type || row['提报类型'] || '').trim(),
-                imageUrls: splitImageUrls(row.pics || row.reported_pic || row.image_urls || row.images || row['送审图片'] || ''),
+                imageUrls: splitImageUrls(firstPresent(row, IMAGE_FIELDS)),
                 preAuditScore,
                 aiScoreLevel: getAiScoreLevel(preAuditScore),
-                specFirstImages,
-                communityLink: String(row['社区链接'] || row.community_link || '').trim(),
-                externalLink: String(row['站外链接'] || row.dewu_app_link || row.external_link || '').trim(),
+                specFirstImages: specFirstImages.length ? specFirstImages : splitImageUrls(row['规格图'] || row.sku_images || row.sku_pics || ''),
+                communityLink: firstUrl(row['社区链接'] || row.community_link || row.communityLink || row['社区/站内链接'] || ''),
+                externalLink: firstUrl(row['站外链接'] || row.dewu_app_link || row.external_link || row.externalLink || row['外网链接'] || row['商品链接'] || ''),
                 healthLevel: String(row.health_level || row.health_score_level || row['健康分等级'] || '').trim(),
                 skuImages: splitImageUrls(row.sku_images || row.sku_pics || row['SKU规格图'] || ''),
                 reviewStatus: normalizeStatus(reviewStatus),
@@ -3249,15 +3307,6 @@
                 if (target.id === 'image-preview-modal') target.hidden = true;
                 if (target.id === 'btn-close-image-preview') document.getElementById('image-preview-modal').hidden = true;
                 if (target.id === 'btn-export-xls') download('star-risk-review-results.xls', toXls(records), 'application/vnd.ms-excel;charset=utf-8');
-                if (target.id === 'btn-clear-progress' && confirm('确定清空当前浏览器中的复审进度？')) {
-                    localStorage.removeItem(STORAGE_KEY);
-                    records.forEach(record => {
-                        record.reviewStatus = '';
-                        record.reviewReason = '';
-                        record.reviewTime = '';
-                    });
-                    render();
-                }
             });
             document.addEventListener('keydown', event => {
                 if (event.key === 'Escape') {
@@ -3499,43 +3548,8 @@
             const savedFeishuConfig = readFeishuConfig();
             if (claimCount) claimCount.value = savedFeishuConfig.claimCount || 20;
             await handleFeishuOauthCallback();
-            const embedded = document.getElementById('embedded-risk-review-data');
-            let text = '';
-            try {
-                text = await readEmbeddedPayload(embedded);
-            } catch (error) {
-                alert(error.message);
-                hideLoading();
-                return;
-            }
-            const dataOffset = getFirstDataOffset(text);
-            if (dataOffset >= 0) {
-                localStorage.removeItem(STORAGE_KEY);
-                showLoading('正在极速加载与初始化数据，请稍候...', '0%');
-                
-                setTimeout(() => {
-                    // 对于小数据或非 NDJSON/TSV 数据，直接同步解析
-                    const trimmedStart = text.slice(dataOffset);
-                    if (text.length < 100000 || (trimmedStart[0] !== '{' && trimmedStart[0] !== '[' && trimmedStart.indexOf('\t') === -1)) {
-                        const parsed = parseReviewData(trimmedStart);
-                        setRecords(parsed.records);
-                        hideLoading();
-                        return;
-                    }
-
-                    // 对于海量数据，进行分块异步解析，避免 split 复制整份数据。
-                    parseEmbeddedRowsAsync(text, parsedRecords => {
-                        setRecords(parsedRecords, false, true);
-                        hideLoading();
-                    }, firstBatch => {
-                        setRecords(firstBatch, false, true);
-                        hideLoading();
-                    });
-                }, 50);
-            } else {
-                render();
-                hideLoading();
-            }
+            setRecords([], false, true);
+            hideLoading();
         }
 
         window.StarRiskReview = {
