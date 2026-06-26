@@ -1682,6 +1682,10 @@
             }
         }
 
+        function redirectUri() {
+            return location.origin + location.pathname;
+        }
+
         function startFeishuAuth() {
             localStorage.removeItem(FEISHU_TOKEN_KEY);
             location.href = '/api/feishu-login';
@@ -1716,21 +1720,27 @@
             const loginOk = params.get('feishu_login');
             const loginError = params.get('feishu_error');
 
-            if (loginError) {
-                alert('飞书登录失败：' + decodeURIComponent(loginError));
-                hideLoading();
-                history.replaceState({}, '', redirectUri());
-                return;
-            }
+            try {
+                if (loginError) {
+                    alert('飞书登录失败：' + decodeURIComponent(loginError));
+                    history.replaceState({}, '', redirectUri());
+                    return;
+                }
 
-            if (loginOk === 'success') {
+                if (loginOk === 'success') {
+                    await refreshFeishuSessionStatus();
+                    history.replaceState({}, '', redirectUri());
+                    updateFeishuSourceLabel('登录成功');
+                    return;
+                }
+
                 await refreshFeishuSessionStatus();
-                history.replaceState({}, '', redirectUri());
-                updateFeishuSourceLabel('登录成功');
-                return;
+            } catch (error) {
+                console.error(error);
+                alert('飞书登录状态检查失败：' + (error.message || error));
+            } finally {
+                hideLoading();
             }
-
-            await refreshFeishuSessionStatus();
         }
 
         async function getFeishuAccessToken() {

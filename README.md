@@ -37,3 +37,9 @@ Cloudflare Pages：
 - Build output directory 填 public
 
 重新上传/部署后，清理浏览器 cookie，再从页面点击“飞书登录”。
+
+
+## 2026-06-27 修复
+
+- 修复前端 `redirectUri is not defined` 导致登录成功后 loading 卡住的问题。
+- `handleFeishuOauthCallback()` 增加异常兜底，登录状态检查失败也不会遮挡页面。
