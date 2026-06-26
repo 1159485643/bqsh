@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>明星同款舆情风险复审 V3</title>
+<style>
+:root{
+  --bg:#151821;--panel:#1d2430;--panel2:#242d3b;--line:#344154;
+  --text:#edf2f7;--muted:#9aa8ba;--blue:#4f9cf9;--green:#43c67a;
+  --red:#ff6678;--amber:#f5b84b;--chip:#111721
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Microsoft YaHei",Arial,sans-serif;font-size:14px}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+.header{
+  position:sticky;top:0;z-index:10;display:grid;grid-template-columns:1fr auto;gap:16px;
+  align-items:center;padding:14px 24px;border-bottom:1px solid var(--line);background:#151821;
+  box-shadow:0 12px 30px rgba(0,0,0,.22)
+}
+h1{margin:0;font-size:20px;line-height:1.2}
+.sub{margin-top:5px;color:var(--muted);font-size:12px}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+.btn,.file-label{
+  min-height:34px;padding:7px 13px;border:1px solid var(--line);border-radius:5px;background:#1d2430;
+  color:#d8e7fb;box-shadow:none;text-decoration:none;display:inline-flex;align-items:center
+}
+.btn:hover,.file-label:hover{border-color:var(--blue);background:#202b3a}
+.control{
+  min-height:34px;border:1px solid var(--line);border-radius:5px;background:#111721;color:var(--text);
+  padding:0 10px;width:100%;outline:none
+}
+.control:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(79,156,249,.16)}
+.main{padding:0 24px 28px}
+.filters{
+  margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);
+  display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px
+}
+.field{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:8px;align-items:center;min-width:0}
+.field label{color:var(--muted);font-size:12px;white-space:nowrap}
+.summary{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:8px;margin-top:10px}
+.metric{
+  position:relative;padding:7px 12px 7px 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel)
+}
+.metric:before{content:"";position:absolute;left:0;top:7px;bottom:7px;width:3px;border-radius:0 3px 3px 0;background:#344154}
+.metric:nth-child(2):before{background:var(--green)}
+.metric:nth-child(3):before{background:var(--red)}
+.metric:nth-child(4):before{background:var(--amber)}
+.metric span{color:var(--muted);font-size:12px}
+.metric strong{margin-left:8px;font-size:15px}
+.good{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--amber)}
+.tools{
+  display:flex;align-items:center;justify-content:space-between;margin-top:12px;color:var(--muted);
+  border-bottom:1px solid var(--line);padding-bottom:10px
+}
+.pager{display:flex;gap:8px;align-items:center}
+.list{padding:14px 0}
+.card{
+  border:1px solid var(--line);border-radius:8px;background:var(--panel);margin-bottom:16px;overflow:hidden;
+  box-shadow:0 1px 0 rgba(0,0,0,.18)
+}
+.card-head{
+  display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line)
+}
+.card-title{font-size:16px;font-weight:650;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;background:#111721;border:1px solid var(--line);font-size:12px;color:#c4ceda}
+.badge.ok{border-color:rgba(67,198,122,.42);background:rgba(67,198,122,.13);color:#73e49d}
+.badge.no{border-color:rgba(255,102,120,.42);background:rgba(255,102,120,.12);color:#ff6678}
+.badge.wait{border-color:rgba(245,184,75,.42);background:rgba(245,184,75,.14);color:#ffd37a}
+.card-body{display:grid;grid-template-columns:120px minmax(0,1fr) 260px;gap:14px;padding:14px}
+.thumb{width:110px;height:110px;border:1px solid var(--line);border-radius:6px;background:#0f1520;object-fit:contain}
+.info{display:grid;gap:8px;color:#d1d9e6}
+.info-row{display:grid;grid-template-columns:84px minmax(0,1fr);gap:8px}
+.info-row b{color:#8c9ebb;font-size:12px;font-weight:600}
+.link{color:#78b7ff;text-decoration:none;word-break:break-all}
+.row-actions{display:flex;flex-direction:column;gap:8px}
+.approve{border-color:#2ecc71;color:#2ecc71;background:transparent;font-weight:600}
+.approve:hover{background:rgba(46,204,113,.1)}
+.reject{border-color:#e74c3c;color:#e74c3c;background:transparent;font-weight:600}
+.reject:hover{background:rgba(231,76,60,.1)}
+.empty{padding:50px;text-align:center;color:var(--muted)}
+.modal{position:fixed;inset:0;background:rgba(15,23,42,.72);display:none;place-items:center;z-index:50;padding:20px}
+.modal.show{display:grid}
+.modal-card{width:min(640px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.36)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
+.modal-body{display:grid;gap:10px;padding:16px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d2430;border:1px solid var(--blue);padding:10px 18px;border-radius:6px;display:none}
+.toast.show{display:block}
+@media(max-width:960px){
+ .header{grid-template-columns:1fr}
+ .actions{justify-content:flex-start}
+ .filters{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .card-body{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<header class="header">
+  <div>
+    <h1>明星同款舆情风险复审 V3</h1>
+    <div class="sub" id="sourceLabel">数据源：未连接</div>
+  </div>
+  <div class="actions">
+    <select id="sourceType" class="control" style="width:140px">
+      <option value="feishu">飞书 Sheets</option>
+      <option value="local">本地文件</option>
+    </select>
+    <button class="btn" id="btnSettings">数据源设置</button>
+    <button class="btn" id="btnSync">同步数据源</button>
+    <input class="control" id="claimCount" type="number" value="20" min="1" max="500" style="width:90px">
+    <button class="btn" id="btnClaim">领取任务</button>
+    <label class="file-label" for="fileInput">导入 Excel</label>
+    <input id="fileInput" type="file" accept=".xlsx,.xls" hidden>
+    <button class="btn" id="btnExport">导出 Excel (.xls)</button>
+    <button class="btn" id="btnClear">清空进度</button>
+  </div>
+</header>
+
+<main class="main">
+  <section class="filters">
+    <div class="field"><label>一级类目</label><select id="fCat1" class="control"></select></div>
+    <div class="field"><label>二级类目</label><select id="fCat2" class="control"></select></div>
+    <div class="field"><label>三级类目</label><select id="fCat3" class="control"></select></div>
+    <div class="field"><label>AI 评分级别</label><select id="fAi" class="control"><option value="">全部</option><option value="高">高</option><option value="中">中</option><option value="低">低</option></select></div>
+    <div class="field"><label>一级管理类目</label><select id="fMgmt1" class="control"></select></div>
+    <div class="field"><label>二级管理类目</label><select id="fMgmt2" class="control"></select></div>
+    <div class="field"><label>三级管理类目</label><select id="fMgmt3" class="control"></select></div>
+    <div class="field"><label>是否通过</label><select id="fStatus" class="control"><option value="">全部</option><option value="待审核">未复审</option><option value="通过">通过</option><option value="不通过">不通过</option></select></div>
+    <div class="field"><label>品牌等级</label><select id="fBrandLevel" class="control"></select></div>
+    <div class="field"><label>商品品牌</label><select id="fBrand" class="control"></select></div>
+    <div class="field" style="grid-column:span 2"><label>搜索</label><input id="fQuery" class="control" placeholder="SPU / 明星 / 品牌 / 标题"></div>
+  </section>
+
+  <section class="summary">
+    <div class="metric"><span>总量</span><strong id="mTotal">0</strong></div>
+    <div class="metric"><span>通过</span><strong class="good" id="mPass">0</strong></div>
+    <div class="metric"><span>不通过</span><strong class="bad" id="mReject">0</strong></div>
+    <div class="metric"><span>未复审</span><strong class="warn" id="mPending">0</strong></div>
+    <div class="metric"><span>进度</span><strong id="mProgress">0.0%</strong></div>
+  </section>
+
+  <div class="tools">
+    <div id="pageInfo">0 条</div>
+    <div class="pager">
+      <label>每页</label>
+      <select id="pageSize" class="control" style="width:70px"><option>10</option><option>20</option><option>50</option><option>100</option></select>
+      <button class="btn" id="prevPage">上一页</button>
+      <button class="btn" id="nextPage">下一页</button>
+    </div>
+  </div>
+
+  <div id="list" class="list"><div class="empty">暂无数据，请连接飞书或导入 Excel。</div></div>
+</main>
+
+<div id="settingsModal" class="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong>数据源设置</strong>
+      <button class="btn" id="closeSettings">关闭</button>
+    </div>
+    <div class="modal-body">
+      <label>App ID<input id="appId" class="control" placeholder="cli_xxx"></label>
+      <label>App Secret<input id="appSecret" class="control" placeholder="每个人自己的 App Secret"></label>
+      <label>处理人<input id="handlerName" class="control" placeholder="例如：张三"></label>
+      <label>飞书链接<input id="feishuUrl" class="control" placeholder="粘贴飞书 Sheets 链接"></label>
+      <label>处理人列名<input id="handlerField" class="control" value="处理人"></label>
+      <label>审核状态列名<input id="statusField" class="control" value="审核状态"></label>
+      <label>审核备注列名<input id="reasonField" class="control" value="审核备注"></label>
+      <label>审核时间列名<input id="timeField" class="control" value="审核时间"></label>
+      <button class="btn" id="saveSettings">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const cfgKey = "star-risk-review-v3-config";
+let allRecords = [];
+let viewRecords = [];
+let currentPage = 0;
+
+const fields = {
+  title:["商品标题","标题","spu_title","title"],
+  spu:["SPU ID","SPU","spu_id"],
+  brand:["品牌","商品品牌","brand_name"],
+  brandLevel:["品牌等级","品牌层级","品牌层级名称","品牌级别","brand_level"],
+  star:["明星同款","明星","label_name"],
+  cat1:["一级类目","category_lv1_name"],
+  cat2:["二级类目","category_lv2_name"],
+  cat3:["三级类目","category_lv3_name"],
+  mgmt1:["一级管理类目","management_category_lv1_name"],
+  mgmt2:["二级管理类目","management_category_lv2_name"],
+  mgmt3:["三级管理类目","management_category_lv3_name"],
+  ai:["AI评分级别","AI 评分级别"],
+  score:["AI预评分","AI预评分(pre_audit_score)"],
+  image:["送审图片","pics","image_urls"],
+  spec:["规格首图","spec_first_image"],
+  community:["社区链接","community_link"],
+  external:["站外链接","external_link","站外链接"],
+  applyType:["提报类型","apply_type"]
+};
+
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1800); }
+function norm(v){ return String(v ?? "").trim(); }
+function getBy(row, arr){ for(const k of arr){ if(row[k] !== undefined && row[k] !== null) return norm(row[k]); } return ""; }
+function splitUrls(v){ return norm(v).split(/[\n\r,，;；\s]+/).filter(x=>/^https?:\/\//.test(x)); }
+function nowText(){ const d=new Date(); return d.toLocaleString("zh-CN",{hour12:false}); }
+
+function loadConfig(){
+  try{ const c=JSON.parse(localStorage.getItem(cfgKey)||"{}");
+    $("appId").value=c.appId||""; $("appSecret").value=c.appSecret||"";
+    $("handlerName").value=c.handlerName||""; $("feishuUrl").value=c.feishuUrl||"";
+    $("handlerField").value=c.handlerField||"处理人"; $("statusField").value=c.statusField||"审核状态";
+    $("reasonField").value=c.reasonField||"审核备注"; $("timeField").value=c.timeField||"审核时间";
+    $("claimCount").value=c.claimCount||20;
+  }catch(e){}
+}
+function saveConfig(){
+  const c={
+    appId:$("appId").value, appSecret:$("appSecret").value, handlerName:$("handlerName").value,
+    feishuUrl:$("feishuUrl").value, handlerField:$("handlerField").value||"处理人",
+    statusField:$("statusField").value||"审核状态", reasonField:$("reasonField").value||"审核备注",
+    timeField:$("timeField").value||"审核时间", claimCount:$("claimCount").value||20
+  };
+  localStorage.setItem(cfgKey,JSON.stringify(c));
+  $("sourceLabel").textContent = c.feishuUrl ? "数据源：飞书 Sheets" : "数据源：未连接";
+  toast("设置已保存");
+}
+function config(){ return JSON.parse(localStorage.getItem(cfgKey)||"{}"); }
+
+function mapRecord(row, idx){
+  const c=config();
+  const status = norm(row[c.statusField] || row["是否通过"] || row["复审结果"] || row["review_status"]);
+  return {
+    _raw: row, _rowIndex: row.__rowIndex ?? idx+2, _version: JSON.stringify(row),
+    title:getBy(row,fields.title), spu:getBy(row,fields.spu), brand:getBy(row,fields.brand),
+    brandLevel:getBy(row,fields.brandLevel), star:getBy(row,fields.star),
+    cat1:getBy(row,fields.cat1), cat2:getBy(row,fields.cat2), cat3:getBy(row,fields.cat3),
+    mgmt1:getBy(row,fields.mgmt1), mgmt2:getBy(row,fields.mgmt2), mgmt3:getBy(row,fields.mgmt3),
+    ai:getBy(row,fields.ai), score:getBy(row,fields.score),
+    image:splitUrls(getBy(row,fields.image))[0] || "", spec:splitUrls(getBy(row,fields.spec))[0] || "",
+    community:getBy(row,fields.community), external:getBy(row,fields.external),
+    applyType:getBy(row,fields.applyType),
+    handler:norm(row[c.handlerField]),
+    status: status || "待审核",
+    reason:norm(row[c.reasonField]),
+    reviewTime:norm(row[c.timeField])
+  };
+}
+
+function fillSelect(id, values){
+  const el=$(id), old=el.value; el.innerHTML='<option value="">全部</option>';
+  [...new Set(values.filter(Boolean))].sort().forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; el.appendChild(o); });
+  el.value=old;
+}
+function refreshFilters(){
+  fillSelect("fCat1",allRecords.map(x=>x.cat1)); fillSelect("fCat2",allRecords.map(x=>x.cat2));
+  fillSelect("fCat3",allRecords.map(x=>x.cat3)); fillSelect("fMgmt1",allRecords.map(x=>x.mgmt1));
+  fillSelect("fMgmt2",allRecords.map(x=>x.mgmt2)); fillSelect("fMgmt3",allRecords.map(x=>x.mgmt3));
+  fillSelect("fBrandLevel",allRecords.map(x=>x.brandLevel)); fillSelect("fBrand",allRecords.map(x=>x.brand));
+}
+function applyFilters(){
+  const q=norm($("fQuery").value).toLowerCase();
+  viewRecords=allRecords.filter(r=>{
+    if($("fCat1").value && r.cat1!==$("fCat1").value) return false;
+    if($("fCat2").value && r.cat2!==$("fCat2").value) return false;
+    if($("fCat3").value && r.cat3!==$("fCat3").value) return false;
+    if($("fMgmt1").value && r.mgmt1!==$("fMgmt1").value) return false;
+    if($("fMgmt2").value && r.mgmt2!==$("fMgmt2").value) return false;
+    if($("fMgmt3").value && r.mgmt3!==$("fMgmt3").value) return false;
+    if($("fAi").value && r.ai!==$("fAi").value) return false;
+    if($("fStatus").value && r.status!==$("fStatus").value) return false;
+    if($("fBrandLevel").value && r.brandLevel!==$("fBrandLevel").value) return false;
+    if($("fBrand").value && r.brand!==$("fBrand").value) return false;
+    if(q && ![r.spu,r.title,r.brand,r.star].join(" ").toLowerCase().includes(q)) return false;
+    return true;
+  });
+  render();
+}
+function updateMetrics(){
+  const total=viewRecords.length, pass=viewRecords.filter(x=>x.status==="通过").length, rej=viewRecords.filter(x=>x.status==="不通过").length;
+  const pend=total-pass-rej, prog=total?((pass+rej)/total*100):0;
+  $("mTotal").textContent=total; $("mPass").textContent=pass; $("mReject").textContent=rej; $("mPending").textContent=pend; $("mProgress").textContent=prog.toFixed(1)+"%";
+}
+function statusBadge(s){ if(s==="通过") return "ok"; if(s==="不通过") return "no"; return "wait"; }
+function render(){
+  updateMetrics();
+  const pageSize=Number($("pageSize").value)||10;
+  const max=Math.max(0,Math.ceil(viewRecords.length/pageSize)-1); currentPage=Math.min(currentPage,max);
+  const rows=viewRecords.slice(currentPage*pageSize,currentPage*pageSize+pageSize);
+  $("pageInfo").textContent=`${viewRecords.length} 条`;
+  const el=$("list");
+  if(!rows.length){ el.innerHTML='<div class="empty">暂无数据</div>'; return; }
+  el.innerHTML="";
+  rows.forEach((r)=>{
+    const div=document.createElement("div"); div.className="card";
+    const idx=allRecords.indexOf(r);
+    div.innerHTML=`
+      <div class="card-head">
+        <div class="card-title">${r.title || "(无标题)"}</div>
+        <span class="badge ${statusBadge(r.status)}">${r.status}</span>
+      </div>
+      <div class="card-body">
+        <img class="thumb" src="${r.image || r.spec || ""}" onerror="this.style.display='none'">
+        <div class="info">
+          <div class="info-row"><b>SPU</b><span>${r.spu||""}</span></div>
+          <div class="info-row"><b>品牌</b><span>${r.brand||""} ${r.brandLevel?`<span class="badge">${r.brandLevel}</span>`:""}</span></div>
+          <div class="info-row"><b>明星</b><span>${r.star||""}</span></div>
+          <div class="info-row"><b>类目</b><span>${[r.cat1,r.cat2,r.cat3].filter(Boolean).join(" / ")}</span></div>
+          <div class="info-row"><b>管理类目</b><span>${[r.mgmt1,r.mgmt2,r.mgmt3].filter(Boolean).join(" / ")}</span></div>
+          <div class="info-row"><b>处理人</b><span>${r.handler||"未领取"}</span></div>
+          <div class="info-row"><b>链接</b><span>${r.community?`<a class="link" target="_blank" href="${r.community}">社区链接</a>`:""} ${r.external?`<a class="link" target="_blank" href="${r.external}">站外链接</a>`:""}</span></div>
+        </div>
+        <div class="row-actions">
+          <button class="btn" onclick="claimOne(${idx})">领取</button>
+          <button class="btn approve" onclick="markOne(${idx},'通过')">审核通过</button>
+          <button class="btn reject" onclick="markOne(${idx},'不通过')">审核不通过</button>
+        </div>
+      </div>`;
+    el.appendChild(div);
+  });
+}
+
+async function api(action,payload={}){
+  const c=config();
+  const res=await fetch("/api/feishu-proxy",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,config:c,...payload})});
+  const data=await res.json().catch(()=>({ok:false,message:"接口返回不是 JSON"}));
+  if(!res.ok || data.ok===false) throw new Error(data.message || data.msg || `请求失败 ${res.status}`);
+  return data;
+}
+async function syncData(){
+  saveConfig();
+  try{
+    toast("同步中...");
+    const data=await api("get");
+    allRecords=(data.rows||[]).map(mapRecord);
+    const c=config();
+    if(c.handlerName){
+      allRecords=allRecords.filter(r=>!r.handler || r.handler.split(/[，,、\n\r\s]+/).includes(c.handlerName));
+    }
+    currentPage=0; refreshFilters(); applyFilters(); toast("同步完成");
+  }catch(e){ alert("同步失败：\n"+e.message); }
+}
+async function claimOne(idx){
+  const r=allRecords[idx], c=config(); if(!c.handlerName){ alert("请先设置处理人"); return; }
+  r.handler=c.handlerName; r.status=r.status||"待审核";
+  await updateRemote(r); applyFilters();
+}
+async function markOne(idx,status){
+  const r=allRecords[idx], c=config(); if(!c.handlerName){ alert("请先设置处理人"); return; }
+  r.handler=r.handler||c.handlerName; r.status=status; r.reviewTime=nowText();
+  if(status==="不通过") r.reason=prompt("请输入不通过原因",r.reason||"")||r.reason||"";
+  await updateRemote(r); applyFilters();
+}
+async function updateRemote(r){
+  try{ await api("update",{record:r}); toast("已写回飞书"); }catch(e){ alert("写回失败：\n"+e.message); }
+}
+async function claimBatch(){
+  saveConfig();
+  const c=config(), n=Math.max(1,Number($("claimCount").value)||20);
+  if(!c.handlerName){ alert("请先设置处理人"); return; }
+  try{ const data=await api("claim",{count:n}); toast(`领取完成：${data.count||0} 条`); await syncData(); }catch(e){ alert("领取失败：\n"+e.message); }
+}
+function exportXls(){
+  let html='<table><tr><th>SPU ID</th><th>商品标题</th><th>品牌</th><th>品牌等级</th><th>明星同款</th><th>处理人</th><th>审核状态</th><th>审核备注</th><th>审核时间</th></tr>';
+  viewRecords.forEach(r=>{ html+=`<tr><td>${r.spu}</td><td>${r.title}</td><td>${r.brand}</td><td>${r.brandLevel}</td><td>${r.star}</td><td>${r.handler}</td><td>${r.status}</td><td>${r.reason}</td><td>${r.reviewTime}</td></tr>`; });
+  html+='</table>';
+  const blob=new Blob(["\ufeff"+html],{type:"application/vnd.ms-excel"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="复审结果.xls"; a.click(); URL.revokeObjectURL(a.href);
+}
+
+document.addEventListener("DOMContentLoaded",()=>{
+  loadConfig();
+  $("btnSettings").onclick=()=>$("settingsModal").classList.add("show");
+  $("closeSettings").onclick=()=>$("settingsModal").classList.remove("show");
+  $("saveSettings").onclick=()=>{ saveConfig(); $("settingsModal").classList.remove("show"); };
+  $("btnSync").onclick=syncData;
+  $("btnClaim").onclick=claimBatch;
+  $("btnExport").onclick=exportXls;
+  $("btnClear").onclick=()=>{ localStorage.removeItem("star-risk-review-progress"); toast("已清空"); };
+  ["fCat1","fCat2","fCat3","fMgmt1","fMgmt2","fMgmt3","fAi","fStatus","fBrandLevel","fBrand","fQuery","pageSize"].forEach(id=>$(id).addEventListener("input",()=>{currentPage=0;applyFilters()}));
+  $("prevPage").onclick=()=>{currentPage=Math.max(0,currentPage-1);render()};
+  $("nextPage").onclick=()=>{currentPage++;render()};
+});
+</script>
+</body>
+</html>
