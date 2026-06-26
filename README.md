@@ -1,25 +1,23 @@
 # 明星同款舆情风险复审 V3
 
-## 本次修复
+## 已检查内容
 
-修复“后台权限已开，但同步仍提示未授权”的问题。
-
-原因：
-- 飞书后台开通权限，不代表当前 user_access_token 已经带这个权限。
-- OAuth 授权链接必须携带 scope。
-- 旧 token 必须清掉并重新授权。
-
-本版已固定 OAuth scope：
-
-wiki:node:read sheets:spreadsheet
-
-点击“飞书授权登录”时会自动带上这两个 scope，并清理旧 token 后重新授权。
-
-## 仍需确认
-
-飞书开放平台应用权限里需要开通：
-- wiki:node:read
-- sheets:spreadsheet
+- 单个前端页面：public/index.html
+- 飞书授权登录在当前页面窗口输入 App ID / App Secret
+- 授权时自动携带 scope：
+  - wiki:node:read
+  - sheets:spreadsheet
+- 数据源设置只保留：
+  - 飞书链接
+  - 处理人姓名
+- 以下字段固定，不支持修改：
+  - 处理人
+  - 审核状态
+  - 审核备注
+  - 审核时间
+- 读取整张表，不在页面设置最大行数
+- 后端分块读取，每次 500 行，避免飞书 10MB 限制
+- 支持标准 Sheets 链接和 Wiki 中的 Sheets 链接解析
 
 ## Cloudflare Pages
 

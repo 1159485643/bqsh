@@ -200,25 +200,42 @@ async function readHeaders(accessToken, spreadsheetToken, sheetId){
 }
 
 async function readAll(accessToken, spreadsheetToken, sheetId){
-  const pageSize = 5000;
+  const pageSize = 500;
   let start = 1;
   let allValues = [];
+  let emptyBlocks = 0;
 
   while (true) {
     const end = start + pageSize - 1;
     const range = `${sheetId}!A${start}:ZZ${end}`;
     const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
+
     const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
     const data = await res.json();
-    if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
+
+    if (data.code !== 0) {
+      throw new Error(`读取表格失败：${data.msg || data.code}`);
+    }
 
     const values = data.data?.valueRange?.values || [];
-    const hasContent = values.some(row => (row || []).some(cell => String(cell ?? "").trim() !== ""));
-    if (!hasContent) break;
+    const hasContent = values.some(row =>
+      (row || []).some(cell => String(cell ?? "").trim() !== "")
+    );
 
-    allValues = allValues.concat(values);
+    if (!hasContent) {
+      emptyBlocks++;
+      if (emptyBlocks >= 2) break;
+    } else {
+      emptyBlocks = 0;
+      allValues = allValues.concat(values);
+    }
+
     if (values.length < pageSize) break;
     start += pageSize;
+
+    if (start > 200000) {
+      throw new Error("读取行数超过 200000，请检查表格是否存在大量空白格式区域");
+    }
   }
 
   const headers = (allValues[0] || []).map(v => String(v || "").trim());
@@ -226,7 +243,11 @@ async function readAll(accessToken, spreadsheetToken, sheetId){
     const obj = { __rowIndex:i+2 };
     headers.forEach((h, idx)=>{ if(h) obj[h] = r[idx] ?? ""; });
     return obj;
-  }).filter(row => Object.keys(row).some(k => k !== "__rowIndex" && String(row[k] || "").trim()));
+  }).filter(row =>
+    Object.keys(row).some(k =>
+      k !== "__rowIndex" && String(row[k] || "").trim() !== ""
+    )
+  );
 
   return { headers, rows };
 }
