@@ -1,47 +1,28 @@
-# 明星同款舆情风险复审 V3 - 保留原登录方式 + 流式同步版
+# 明星同款舆情风险复审 V3 - 应用身份直连表格版
 
-## 本版保留
+## 本版核心变化
 
-- 保留你上传的这一版登录方式：
-  - 前端填写 App ID / App Secret
-  - 点击飞书授权登录
-  - token 保存在当前浏览器
-  - 不使用 SaaS KV 登录
-- 保留原 UI、图片预览、处理人筛选、Excel 合并按钮、领取任务、不通过快捷原因、不通过原因不能为空校验。
+- 不再使用飞书 OAuth 登录。
+- 不再检查 user_access_token。
+- App ID / App Secret 已合并到“数据源设置”。
+- 用户填写 App ID、App Secret、飞书表格链接、处理人姓名后即可使用。
+- 后端通过 App ID / App Secret 换取 tenant_access_token。
+- 读取、领取、动态同步、审核回写全部使用应用身份访问表格。
 
-## 同步过来的优化
+## 必须满足
 
-- 基础数据改成流式加载：
-  - 首批数据到达即展示
-  - 后续批次后台继续补全
-  - 不再等全量读取完才显示页面
-- 动态同步优化：
-  - 周期改为 60 秒
-  - 只同步动态字段：处理人 / 审核状态 / 审核备注 / 审核时间
-  - 有变更时 30 秒后再同步
-  - 无变更时 60 秒后同步
-  - 失败自动退避重试
-  - 单线程 setTimeout 自调度，避免 setInterval 重叠卡死
-  - 登录刷新、回写、动态同步均有超时保护
-- 回写优化：
-  - 审核操作后约 700ms 触发回写
-  - 1.5 秒兜底检查
-  - 同一行连续修改只保留最后一次
-- OAuth scope 补齐：
-  - wiki:node:read
-  - sheets:spreadsheet
-  - sheets:spreadsheet:read
+飞书表格必须把该应用加入文档权限，并给应用可编辑权限，否则应用身份无法读写该表。
+
+## 保留优化
+
+- 基础数据流式加载。
+- 动态同步 60 秒周期，有变更 30 秒后再同步。
+- 动态同步只同步：处理人 / 审核状态 / 审核备注 / 审核时间。
+- 审核回写约 700ms 触发，1.5 秒兜底检查。
+- 单线程动态同步调度，带超时和失败退避。
+- 保留原审核 UI、图片预览、处理人筛选、Excel 合并按钮、领取任务、不通过快捷原因、不通过原因不能为空校验。
 
 ## Cloudflare Pages
 
 - Build command 留空
 - Build output directory 填 public
-
-
-## 本次调整
-
-- 已移除无效 OAuth scope：`sheets:spreadsheet:write`
-- 当前 scope 保留：
-  - `wiki:node:read`
-  - `sheets:spreadsheet`
-  - `sheets:spreadsheet:read`

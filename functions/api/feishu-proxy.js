@@ -1,11 +1,14 @@
+const TENANT_TOKEN_CACHE = new Map();
+
 export async function onRequestPost({ request }) {
   try {
     const body = await request.json();
-    const { action, config, record, count, accessToken } = body;
+    const { action, config, record, count } = body;
 
-    if (!accessToken) return json({ ok:false, message:"缺少 user_access_token，请先飞书授权登录" }, 401);
+    if (!config?.appId || !config?.appSecret) return json({ ok:false, message:"缺少 App ID 或 App Secret" }, 400);
     if (!config?.feishuUrl) return json({ ok:false, message:"缺少飞书链接" }, 400);
 
+    const accessToken = await getTenantAccessToken(config.appId, config.appSecret);
     let meta = parseFeishuUrl(config.feishuUrl);
 
     if (!meta.spreadsheetToken && meta.wikiToken) {
@@ -95,6 +98,39 @@ function json(data, status=200){
     status,
     headers:{ "Content-Type":"application/json; charset=utf-8" }
   });
+}
+
+async function getTenantAccessToken(appId, appSecret){
+  const key = `${appId}:${appSecret}`;
+  const cached = TENANT_TOKEN_CACHE.get(key);
+  if (cached && cached.token && cached.expiresAt > Date.now() + 60000) {
+    return cached.token;
+  }
+
+  const res = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json; charset=utf-8" },
+    body: JSON.stringify({
+      app_id: appId,
+      app_secret: appSecret
+    })
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.code !== 0) {
+    throw new Error(`获取 tenant_access_token 失败：${data.msg || data.message || data.code || res.status}`);
+  }
+
+  const token = data.tenant_access_token || data.data?.tenant_access_token;
+  if (!token) throw new Error("获取 tenant_access_token 失败：接口未返回 token");
+
+  const expire = Number(data.expire || data.data?.expire || 7200);
+  TENANT_TOKEN_CACHE.set(key, {
+    token,
+    expiresAt: Date.now() + Math.max(60, expire - 120) * 1000
+  });
+
+  return token;
 }
 
 function cleanInput(input){
