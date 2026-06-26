@@ -1,20 +1,43 @@
-# 明星同款舆情风险复审 V3
+# 明星同款舆情风险复审 V3 - SaaS KV 登录版
 
-本版调整为稳定调度版：
+## 这版改动
 
-1. 手动同步仍然拉取完整基础数据。
-2. 后台自动同步只同步动态字段：
-   - 处理人
-   - 审核状态
-   - 审核备注
-   - 审核时间
-   基础字段、图片、链接等固定数据不再后台重复请求。
-3. 前端飞书请求改为串行队列，避免同步、领取、回写并发抢接口。
-4. 回写改为 5 秒周期批量检查，有变更才回写；同一行周期内多次修改只保留最后一次。
-5. 读写接口增加“请求过多/限流”自动退避重试。
-6. 页面顶部小字展示后台动态同步周期、下次同步倒计时、回写队列状态。
-7. 保留原 UI、图片预览、不通过快捷原因、不通过原因不能为空校验、处理人筛选、Excel 合并按钮、领取按钮内进度。
+- 前端已去掉 App ID / App Secret 输入。
+- 用户只需要点击“飞书登录”。
+- OAuth 登录由 Cloudflare Functions 处理。
+- token 存入 Cloudflare KV，按浏览器 session 隔离。
+- 前端不再保存 user_access_token。
+- feishu-proxy 自动从 cookie + KV 获取 token，并在需要时刷新。
+- 保留之前稳定版能力：
+  - 手动同步基础数据
+  - 后台只同步动态字段：处理人 / 审核状态 / 审核备注 / 审核时间
+  - 5秒周期批量回写
+  - 防请求过多退避
+  - 原 UI、图片预览、不通过快捷原因、不通过原因不能为空校验
+  - 处理人筛选、Excel 合并按钮、领取按钮内进度
 
-Cloudflare Pages：
+## Cloudflare 需要配置
+
+Variables and secrets 中你只需要保证已有：
+
+- FEISHU_APP_ID
+- FEISHU_APP_SECRET
+- FEISHU_REDIRECT_URI
+
+KV 已写入 wrangler.toml：
+
+- binding: FEISHU_KV
+- id: 576f4e274ed64404a9519cce09f764dc
+
+## 飞书后台回调地址
+
+必须和 Cloudflare 的 FEISHU_REDIRECT_URI 完全一致，例如：
+
+https://你的域名/api/feishu-oauth-callback
+
+## Cloudflare Pages
+
 - Build command 留空
 - Build output directory 填 public
+
+改完变量和 wrangler.toml 后需要重新部署。

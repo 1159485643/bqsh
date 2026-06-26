@@ -1388,7 +1388,7 @@
             <div class="subtitle sync-status-line" id="sync-status-line">后台同步：未启动 / 回写：无待处理</div>
         </div>
         <div class="actions">
-            <button class="btn" id="btn-feishu-login" type="button">飞书授权登录</button>
+            <button class="btn" id="btn-feishu-login" type="button">飞书登录</button>
             <button class="btn" id="btn-feishu-logout" type="button">退出授权</button>
             <button class="btn" id="btn-data-source-settings" type="button">数据源设置</button>
             <button class="btn" id="btn-sync-feishu" type="button">同步数据源</button>
@@ -1535,34 +1535,7 @@
             </aside>
         </section>
     </main>
-
-    <div class="modal" id="feishu-auth-modal" hidden>
-        <div class="reason-modal-card">
-            <div class="reason-modal-header">
-                <strong>飞书授权登录</strong>
-                <button class="clear-filter" type="button" data-close-feishu-auth aria-label="关闭飞书授权窗口">×</button>
-            </div>
-            <div class="reason-modal-body">
-                <label class="review-reason-label" for="feishu-app-id">
-                    App ID
-                    <input class="control" id="feishu-app-id" placeholder="cli_xxx">
-                </label>
-                <label class="review-reason-label" for="feishu-app-secret">
-                    App Secret
-                    <input class="control" id="feishu-app-secret" type="password" placeholder="飞书应用 App Secret">
-                </label>
-                <div class="reason-modal-error" id="feishu-auth-error"></div>
-                <div class="inline-empty">回调地址：<span id="feishu-redirect-uri"></span></div>
-            </div>
-            <div class="reason-modal-actions">
-                <button class="btn" type="button" data-close-feishu-auth>取消</button>
-                <button class="btn approve" type="button" data-save-feishu-auth>只保存</button>
-                <button class="btn approve" type="button" data-start-feishu-auth>保存并授权</button>
-            </div>
-        </div>
-    </div>
-
-    <div class="modal" id="data-source-settings-modal" hidden>
+<div class="modal" id="data-source-settings-modal" hidden>
         <div class="reason-modal-card">
             <div class="reason-modal-header">
                 <strong>数据源设置</strong>
@@ -1664,9 +1637,13 @@
 
         function writeFeishuToken(token) {
             if (!token) return;
-            const expiresIn = Number(token.expires_in || token.expire || 7200);
-            token.expires_at = Date.now() + Math.max(60, expiresIn - 120) * 1000;
-            localStorage.setItem(FEISHU_TOKEN_KEY, JSON.stringify(token));
+            const safe = {
+                session: true,
+                userId: token.userId || token.user_id || token.open_id || '',
+                userName: token.userName || token.name || token.user_name || '',
+                loggedAt: Date.now()
+            };
+            localStorage.setItem(FEISHU_TOKEN_KEY, JSON.stringify(safe));
             updateFeishuSourceLabel();
         }
 
@@ -1675,12 +1652,28 @@
             updateFeishuSourceLabel();
         }
 
+        async function refreshFeishuSessionStatus() {
+            try {
+                const response = await fetch('/api/feishu-session', { method: 'GET' });
+                const data = await response.json();
+                if (response.ok && data.ok && data.loggedIn) {
+                    writeFeishuToken(data);
+                    return true;
+                }
+                clearFeishuToken();
+                return false;
+            } catch (error) {
+                return !!readFeishuToken();
+            }
+        }
+
         function updateFeishuSourceLabel(extra) {
             const config = readFeishuConfig();
             const token = readFeishuToken();
-            const hasToken = !!(token && (token.access_token || token.user_access_token));
+            const hasToken = !!(token && token.session);
             const parts = [];
-            parts.push(hasToken ? '飞书已授权' : '飞书未授权');
+            parts.push(hasToken ? '飞书已登录' : '飞书未登录');
+            if (token && (token.userName || token.userId)) parts.push(`账号：${token.userName || token.userId}`);
             if (config.handlerName) parts.push(`处理人：${config.handlerName}`);
             if (extra) parts.push(extra);
             const sourceLabel = document.getElementById('source-label');
@@ -1689,124 +1682,60 @@
             }
         }
 
-        function redirectUri() {
-            return location.origin + location.pathname;
+        function startFeishuAuth() {
+            localStorage.removeItem(FEISHU_TOKEN_KEY);
+            location.href = '/api/feishu-login';
         }
 
         function openFeishuAuthModal() {
-            const config = readFeishuConfig();
-            const appId = document.getElementById('feishu-app-id');
-            const appSecret = document.getElementById('feishu-app-secret');
-            const redirect = document.getElementById('feishu-redirect-uri');
-            if (appId) appId.value = config.appId || '';
-            if (appSecret) appSecret.value = config.appSecret || '';
-            if (redirect) redirect.textContent = redirectUri();
-            setText('feishu-auth-error', '');
-            const modal = document.getElementById('feishu-auth-modal');
-            if (modal) modal.hidden = false;
+            startFeishuAuth();
         }
 
-        function closeFeishuAuthModal() {
-            const modal = document.getElementById('feishu-auth-modal');
-            if (modal) modal.hidden = true;
-            setText('feishu-auth-error', '');
-        }
+        function closeFeishuAuthModal() {}
 
         function saveFeishuAuthConfig() {
-            const appId = document.getElementById('feishu-app-id');
-            const appSecret = document.getElementById('feishu-app-secret');
-            const config = writeFeishuConfig({
-                appId: appId ? appId.value.trim() : '',
-                appSecret: appSecret ? appSecret.value.trim() : '',
-                scope: FEISHU_REQUIRED_SCOPE,
-            });
-            return config;
+            return readFeishuConfig();
         }
 
-        function startFeishuAuth() {
-            const config = saveFeishuAuthConfig();
-            if (!config.appId || !config.appSecret) {
-                setText('feishu-auth-error', 'App ID 和 App Secret 不能为空');
-                return;
-            }
-            localStorage.removeItem(FEISHU_TOKEN_KEY);
-            const state = Math.random().toString(36).slice(2) + Date.now();
-            sessionStorage.setItem('starRiskReviewFeishuOauthState', state);
-            const url = new URL('https://open.feishu.cn/open-apis/authen/v1/authorize');
-            url.searchParams.set('app_id', config.appId);
-            url.searchParams.set('redirect_uri', redirectUri());
-            url.searchParams.set('state', state);
-            url.searchParams.set('scope', FEISHU_REQUIRED_SCOPE);
-            location.href = url.toString();
+        async function logoutFeishu() {
+            try {
+                await fetch('/api/feishu-logout', { method: 'POST' });
+            } catch (error) {}
+            clearFeishuToken();
         }
 
         async function feishuOauthApi(action, payload) {
-            const response = await fetch('/api/feishu-oauth', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(Object.assign({ action }, payload || {})),
-            });
-            const text = await response.text();
-            let data;
-            try {
-                data = JSON.parse(text);
-            } catch (error) {
-                throw new Error('接口返回不是 JSON，请检查 Cloudflare Functions 是否部署成功');
-            }
-            if (!response.ok || data.ok === false) {
-                throw new Error(data.message || data.msg || `请求失败 ${response.status}`);
-            }
+            const response = await fetch('/api/feishu-session', { method: 'GET' });
+            const data = await response.json().catch(() => ({ ok:false }));
+            if (!response.ok || data.ok === false) throw new Error(data.message || '飞书登录状态异常');
             return data;
         }
 
         async function handleFeishuOauthCallback() {
             const params = new URLSearchParams(location.search);
-            const code = params.get('code');
-            if (!code) return;
-            const state = params.get('state') || '';
-            const localState = sessionStorage.getItem('starRiskReviewFeishuOauthState') || '';
-            if (localState && state && state !== localState) {
-                alert('飞书授权失败：state 校验失败');
+            const loginOk = params.get('feishu_login');
+            const loginError = params.get('feishu_error');
+
+            if (loginError) {
+                alert('飞书登录失败：' + decodeURIComponent(loginError));
+                history.replaceState({}, '', redirectUri());
                 return;
             }
-            try {
-                showLoading('飞书授权处理中，请稍候...', '0%');
-                const config = readFeishuConfig();
-                if (!config.appId || !config.appSecret) throw new Error('缺少 App ID 或 App Secret，请重新授权');
-                const data = await feishuOauthApi('exchange', {
-                    code,
-                    redirectUri: redirectUri(),
-                    appId: config.appId,
-                    appSecret: config.appSecret,
-                });
-                writeFeishuToken(data.token);
+
+            if (loginOk === 'success') {
+                await refreshFeishuSessionStatus();
                 history.replaceState({}, '', redirectUri());
-                updateFeishuSourceLabel('授权成功');
-            } catch (error) {
-                alert('飞书授权失败：' + error.message);
-            } finally {
-                hideLoading();
+                updateFeishuSourceLabel('登录成功');
+                return;
             }
+
+            await refreshFeishuSessionStatus();
         }
 
         async function getFeishuAccessToken() {
-            let token = readFeishuToken();
-            if (!token || (!token.access_token && !token.user_access_token)) {
-                throw new Error('未飞书授权，请先点击“飞书授权登录”');
-            }
-            const access = token.user_access_token || token.access_token;
-            if (token.expires_at && Date.now() < token.expires_at) return access;
-            if (!token.refresh_token) return access;
-
-            const config = readFeishuConfig();
-            const data = await feishuOauthApi('refresh', {
-                refreshToken: token.refresh_token,
-                appId: config.appId,
-                appSecret: config.appSecret,
-            });
-            writeFeishuToken(data.token);
-            token = readFeishuToken();
-            return token.user_access_token || token.access_token;
+            const ok = await refreshFeishuSessionStatus();
+            if (!ok) throw new Error('未登录飞书，请先点击“飞书登录”');
+            return '';
         }
 
         function openDataSourceSettings() {
@@ -1859,14 +1788,13 @@
         }
 
         async function feishuFetchWithRetry(action, payload) {
-            const accessToken = await getFeishuAccessToken();
             const config = readFeishuConfig();
 
             for (let attempt = 1; attempt <= 4; attempt++) {
                 const response = await fetch('/api/feishu-proxy', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(Object.assign({ action, config, accessToken }, payload || {})),
+                    body: JSON.stringify(Object.assign({ action, config }, payload || {})),
                 });
                 const text = await response.text();
                 let data;
@@ -1877,6 +1805,11 @@
                 }
 
                 if (response.ok && data.ok !== false) return data;
+
+                if (response.status === 401) {
+                    clearFeishuToken();
+                    throw new Error(data.message || '飞书登录已失效，请重新登录');
+                }
 
                 if (attempt < 4 && isRateLimitError(response, data)) {
                     updateTopSyncStatus(`请求过多，${attempt * 1.2}s 后重试`);
@@ -3577,8 +3510,8 @@
                     return;
                 }
                 if (target.id === 'btn-feishu-logout') {
-                    clearFeishuToken();
-                    alert('已退出飞书授权');
+                    logoutFeishu();
+                    alert('已退出飞书登录');
                     return;
                 }
                 if (target.id === 'btn-data-source-settings') {
@@ -3601,19 +3534,6 @@
                 if (!target.closest('#excel-menu')) {
                     const panel = document.getElementById('excel-menu-panel');
                     if (panel) panel.hidden = true;
-                }
-                if (target.closest('[data-close-feishu-auth]') || target.id === 'feishu-auth-modal') {
-                    closeFeishuAuthModal();
-                    return;
-                }
-                if (target.closest('[data-save-feishu-auth]')) {
-                    saveFeishuAuthConfig();
-                    setText('feishu-auth-error', '已保存到本地浏览器');
-                    return;
-                }
-                if (target.closest('[data-start-feishu-auth]')) {
-                    startFeishuAuth();
-                    return;
                 }
                 if (target.closest('[data-close-data-source-settings]') || target.id === 'data-source-settings-modal') {
                     closeDataSourceSettings();
@@ -3728,12 +3648,6 @@
             });
             document.addEventListener('keydown', event => {
                 if (event.key === 'Escape') {
-                    const feishuAuthModal = document.getElementById('feishu-auth-modal');
-                    if (feishuAuthModal && !feishuAuthModal.hidden) {
-                        closeFeishuAuthModal();
-                        event.preventDefault();
-                        return;
-                    }
                     const dataSourceModal = document.getElementById('data-source-settings-modal');
                     if (dataSourceModal && !dataSourceModal.hidden) {
                         closeDataSourceSettings();

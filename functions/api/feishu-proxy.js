@@ -1,9 +1,9 @@
-export async function onRequestPost({ request }) {
+export async function onRequestPost({ request, env }) {
   try {
     const body = await request.json();
-    const { action, config, record, count, accessToken } = body;
+    const { action, config, record, count } = body;
 
-    if (!accessToken) return json({ ok:false, message:"缺少 user_access_token，请先飞书授权登录" }, 401);
+    const accessToken = await getAccessTokenFromSession(request, env);
     if (!config?.feishuUrl) return json({ ok:false, message:"缺少飞书链接" }, 400);
 
     let meta = parseFeishuUrl(config.feishuUrl);
@@ -86,7 +86,7 @@ export async function onRequestPost({ request }) {
 
     return json({ ok:false, message:"未知 action" }, 400);
   } catch (e) {
-    return json({ ok:false, message:e.message || String(e) }, 500);
+    return json({ ok:false, message:e.message || String(e) }, e.status || 500);
   }
 }
 
@@ -95,6 +95,90 @@ function json(data, status=200){
     status,
     headers:{ "Content-Type":"application/json; charset=utf-8" }
   });
+}
+
+function getCookie(request, name) {
+  const cookie = request.headers.get("Cookie") || "";
+  const part = cookie.split(";").map(v => v.trim()).find(v => v.startsWith(name + "="));
+  return part ? decodeURIComponent(part.slice(name.length + 1)) : "";
+}
+
+async function getAccessTokenFromSession(request, env) {
+  if (!env.FEISHU_KV) throw new Error("缺少 KV 绑定 FEISHU_KV");
+
+  const sessionId = getCookie(request, "feishu_session");
+  if (!sessionId) {
+    const err = new Error("未登录飞书，请先点击“飞书登录”");
+    err.status = 401;
+    throw err;
+  }
+
+  const key = `session:${sessionId}`;
+  const text = await env.FEISHU_KV.get(key);
+  if (!text) {
+    const err = new Error("飞书登录已失效，请重新登录");
+    err.status = 401;
+    throw err;
+  }
+
+  let session;
+  try {
+    session = JSON.parse(text);
+  } catch (e) {
+    const err = new Error("飞书登录信息损坏，请重新登录");
+    err.status = 401;
+    throw err;
+  }
+
+  let token = session.token || session;
+  const access = token.user_access_token || token.access_token;
+  if (access && token.expires_at && Date.now() < token.expires_at) {
+    return access;
+  }
+
+  if (!token.refresh_token) {
+    if (access) return access;
+    const err = new Error("飞书 token 缺失，请重新登录");
+    err.status = 401;
+    throw err;
+  }
+
+  if (!env.FEISHU_APP_ID || !env.FEISHU_APP_SECRET) {
+    throw new Error("缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET");
+  }
+
+  const refreshed = await refreshUserToken(env, token.refresh_token);
+  const nextToken = { ...token, ...refreshed };
+  const expiresIn = Number(nextToken.expires_in || nextToken.expire || 7200);
+  nextToken.expires_at = Date.now() + Math.max(60, expiresIn - 120) * 1000;
+
+  session.token = nextToken;
+  session.updated_at = Date.now();
+
+  await env.FEISHU_KV.put(key, JSON.stringify(session), {
+    expirationTtl: 60 * 60 * 24 * 30
+  });
+
+  return nextToken.user_access_token || nextToken.access_token;
+}
+
+async function refreshUserToken(env, refreshToken) {
+  const res = await fetch("https://open.feishu.cn/open-apis/authen/v2/oauth/token", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json; charset=utf-8" },
+    body: JSON.stringify({
+      grant_type:"refresh_token",
+      client_id:env.FEISHU_APP_ID,
+      client_secret:env.FEISHU_APP_SECRET,
+      refresh_token:refreshToken
+    })
+  });
+  const raw = await res.json();
+  const data = raw.data || raw;
+  if (!res.ok || raw.error || raw.code) {
+    throw new Error(raw.error_description || raw.message || raw.msg || `刷新飞书 token 失败：${res.status}`);
+  }
+  return data;
 }
 
 function cleanInput(input){
