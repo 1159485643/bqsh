@@ -1843,11 +1843,23 @@
             return new Promise(resolve => setTimeout(resolve, ms));
         }
 
+        function withTimeout(promise, ms, message) {
+            let timer = null;
+            const timeout = new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(message || '请求超时')), ms);
+            });
+            return Promise.race([promise, timeout]).finally(() => {
+                if (timer) clearTimeout(timer);
+            });
+        }
+
         const FEISHU_SYNC_PAGE_SIZE = 4000;
         const FEISHU_SILENT_SYNC_INTERVAL = 60000;
         const FEISHU_WRITEBACK_INTERVAL = 1500;
         let feishuSilentSyncTimer = null;
         let feishuSilentSyncRunning = false;
+        let feishuLastSilentSyncStartedAt = 0;
+        let feishuSilentSyncBackoff = 0;
         let feishuNextSilentSyncAt = 0;
         let feishuLastSyncText = '未同步';
         let reviewWriteTimer = null;
@@ -1873,7 +1885,7 @@
             const queueSize = reviewWriteQueue ? reviewWriteQueue.size : 0;
             const syncText = feishuSilentSyncRunning ? '同步中' : feishuLastSyncText;
             const writeText = reviewWriteRunning ? '回写中' : (queueSize ? `待回写 ${queueSize} 条` : reviewLastWriteText);
-            const nextText = feishuNextSilentSyncAt ? `${remain}s 后` : '未启动';
+            const nextText = feishuNextSilentSyncAt ? (remain > 0 ? `${remain}s 后` : (feishuSilentSyncRunning ? '执行中' : '即将执行')) : '未启动';
             line.textContent = `后台动态同步：${syncText} / 周期 ${Math.round(FEISHU_SILENT_SYNC_INTERVAL / 1000)}s / 下次 ${nextText} / ${writeText}${extra ? ' / ' + extra : ''}`;
         }
 
@@ -2140,47 +2152,89 @@
             }
         }
 
+        function scheduleNextSilentSync(delay) {
+            const safeDelay = Math.max(5000, Number(delay || FEISHU_SILENT_SYNC_INTERVAL));
+            if (feishuSilentSyncTimer) clearTimeout(feishuSilentSyncTimer);
+            feishuNextSilentSyncAt = Date.now() + safeDelay;
+            updateTopSyncStatus();
+            feishuSilentSyncTimer = setTimeout(() => {
+                silentSyncFeishuData().catch(error => {
+                    feishuSilentSyncRunning = false;
+                    feishuLastSyncText = `动态同步异常 ${formatClockTime(Date.now())}`;
+                    console.warn('后台动态同步异常', error);
+                    scheduleNextSilentSync(Math.min(180000, FEISHU_SILENT_SYNC_INTERVAL + feishuSilentSyncBackoff));
+                });
+            }, safeDelay);
+        }
+
         async function silentSyncFeishuData() {
             const config = readFeishuConfig();
-            const token = readFeishuToken();
-            if (!config.feishuUrl || !token || (!token.access_token && !token.user_access_token)) return;
-            if (feishuSilentSyncRunning || reviewWriteRunning) return;
 
-            if (reviewWriteQueue && reviewWriteQueue.size) {
-                await flushReviewWriteQueue(false);
+            if (!config.feishuUrl) {
+                feishuLastSyncText = '未配置飞书链接';
+                scheduleNextSilentSync(FEISHU_SILENT_SYNC_INTERVAL);
+                return;
             }
-            if (reviewWriteRunning) return;
 
-            if (!records.length) {
-                feishuLastSyncText = '未加载基础数据，跳过动态同步';
-                feishuNextSilentSyncAt = Date.now() + FEISHU_SILENT_SYNC_INTERVAL;
-                updateTopSyncStatus();
+            if (feishuSilentSyncRunning) {
+                updateTopSyncStatus('上一轮仍在执行');
                 return;
             }
 
             feishuSilentSyncRunning = true;
-            feishuLastSyncText = '动态同步中';
+            feishuLastSilentSyncStartedAt = Date.now();
+            feishuLastSyncText = '检查登录状态';
             updateTopSyncStatus();
 
+            let nextDelay = FEISHU_SILENT_SYNC_INTERVAL;
+
             try {
-                const result = await readFeishuDynamicPages(true);
+                const loggedIn = await withTimeout(refreshFeishuSessionStatus(), 8000, '登录状态检查超时');
+                if (!loggedIn) {
+                    feishuLastSyncText = '未登录，跳过动态同步';
+                    nextDelay = FEISHU_SILENT_SYNC_INTERVAL;
+                    return;
+                }
+
+                if (reviewWriteRunning) {
+                    feishuLastSyncText = '回写中，延后动态同步';
+                    nextDelay = 10000;
+                    return;
+                }
+
+                if (reviewWriteQueue && reviewWriteQueue.size) {
+                    feishuLastSyncText = `先回写 ${reviewWriteQueue.size} 条`;
+                    updateTopSyncStatus();
+                    await withTimeout(flushReviewWriteQueue(false), 12000, '回写队列超时');
+                }
+
+                if (!records.length) {
+                    feishuLastSyncText = '未加载基础数据，跳过动态同步';
+                    nextDelay = FEISHU_SILENT_SYNC_INTERVAL;
+                    return;
+                }
+
+                feishuLastSyncText = '动态同步中';
+                updateTopSyncStatus();
+
+                const result = await withTimeout(readFeishuDynamicPages(true), 45000, '动态同步超时');
                 const changed = applyDynamicRows(result.rows);
+                feishuSilentSyncBackoff = 0;
                 feishuLastSyncText = `动态同步 ${result.rows.length} 行 / 变更 ${changed} 条 ${formatClockTime(Date.now())}`;
+                nextDelay = changed ? 30000 : FEISHU_SILENT_SYNC_INTERVAL;
             } catch (error) {
-                feishuLastSyncText = `动态同步失败 ${formatClockTime(Date.now())}`;
+                feishuSilentSyncBackoff = Math.min(120000, (feishuSilentSyncBackoff || 0) + 30000);
+                nextDelay = FEISHU_SILENT_SYNC_INTERVAL + feishuSilentSyncBackoff;
+                feishuLastSyncText = `动态同步失败，${Math.round(nextDelay / 1000)}s 后重试 ${formatClockTime(Date.now())}`;
                 console.warn('后台动态同步失败', error);
             } finally {
                 feishuSilentSyncRunning = false;
-                feishuNextSilentSyncAt = Date.now() + FEISHU_SILENT_SYNC_INTERVAL;
-                updateTopSyncStatus();
+                scheduleNextSilentSync(nextDelay);
             }
         }
 
         function startFeishuSilentSync() {
-            if (feishuSilentSyncTimer) clearInterval(feishuSilentSyncTimer);
-            feishuNextSilentSyncAt = Date.now() + FEISHU_SILENT_SYNC_INTERVAL;
-            updateTopSyncStatus();
-            feishuSilentSyncTimer = setInterval(silentSyncFeishuData, FEISHU_SILENT_SYNC_INTERVAL);
+            scheduleNextSilentSync(Math.min(10000, FEISHU_SILENT_SYNC_INTERVAL));
         }
 
         function getRemoteRowIndex(record) {
