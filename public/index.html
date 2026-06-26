@@ -1229,6 +1229,28 @@
             font-size: 15px;
             font-weight: 500;
         }
+        .loading-progress-track {
+            width: min(420px, 76vw);
+            height: 8px;
+            margin-top: 14px;
+            border-radius: 999px;
+            background: rgba(79, 156, 249, 0.18);
+            overflow: hidden;
+            border: 1px solid rgba(79, 156, 249, 0.26);
+        }
+        .loading-progress-bar {
+            width: 0%;
+            height: 100%;
+            border-radius: inherit;
+            background: var(--blue);
+            transition: width 0.25s ease;
+        }
+        .loading-progress-detail {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+        }
         @keyframes loading-spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
@@ -1796,19 +1818,54 @@
             return data;
         }
 
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
         async function syncFeishuData() {
             const config = saveDataSourceSettings();
             if (!config.feishuUrl) {
                 alert('请先在数据源设置里填写飞书链接');
                 return;
             }
-            showLoading('正在同步飞书数据，请稍候...', '0%');
+
+            const rows = [];
+            let start = 2;
+            let pageSize = 500;
+            let batch = 0;
+            let emptyBlocks = 0;
+
+            showLoading('正在准备同步飞书数据...', '0%');
             try {
-                const data = await feishuSheetApi('get');
-                const rows = data.rows || [];
+                while (true) {
+                    const visualPercent = Math.min(95, 5 + batch * 6);
+                    showLoading(`正在同步飞书数据：第 ${batch + 1} 批`, `${visualPercent}% · 已读取 ${rows.length} 行`);
+
+                    const data = await feishuSheetApi('getPage', { start, pageSize });
+                    const pageRows = data.rows || [];
+                    if (pageRows.length) {
+                        rows.push(...pageRows);
+                        emptyBlocks = 0;
+                    } else {
+                        emptyBlocks++;
+                    }
+
+                    batch += 1;
+                    const nextPercent = data.done ? 100 : Math.min(95, 5 + batch * 6);
+                    showLoading(`正在同步飞书数据：已读取 ${rows.length} 行`, `${nextPercent}% · 第 ${batch} 批完成`);
+
+                    if (data.done || emptyBlocks >= 2) break;
+
+                    start = Number(data.nextStart || (start + (data.pageSize || pageSize)));
+                    pageSize = Number(data.pageSize || pageSize);
+                    await sleep(20);
+                }
+
                 localStorage.removeItem(STORAGE_KEY);
                 setRecords(rows, false);
                 setText('source-label', `数据源：飞书 / 全部数据 / ${rows.length} 条`);
+                showLoading(`同步完成，共 ${rows.length} 条`, '100%');
+                await sleep(350);
             } catch (error) {
                 alert('同步失败：\n' + error.message);
             } finally {
@@ -1839,8 +1896,10 @@
             const count = Math.max(1, Number(countEl ? countEl.value : config.claimCount || 20) || 20);
             const btn = document.getElementById('btn-claim-task');
             if (btn) btn.disabled = true;
+            showLoading(`正在批量领取 ${count} 条任务...`, '35%');
             try {
                 const data = await feishuSheetApi('claim', { count });
+                showLoading(`领取完成，正在更新页面...`, '90%');
                 const claimedRows = new Set((data.rows || []).map(v => Number(v)).filter(Boolean));
                 if (claimedRows.size) {
                     records.forEach(record => {
@@ -1854,10 +1913,13 @@
                     populateFilters();
                     render(true);
                 }
+                showLoading(`领取完成：${data.count || 0} 条`, '100%');
+                await sleep(250);
                 alert(`领取完成：${data.count || 0} 条`);
             } catch (error) {
                 alert('领取失败：\n' + error.message);
             } finally {
+                hideLoading();
                 if (btn) btn.disabled = false;
             }
         }
@@ -1986,6 +2048,7 @@
         const PRE_AUDIT_SCORE_FIELDS = ['pre_audit_score', 'AI预评分', 'AI预评分(pre_audit_score)', 'ai_pre_score', 'preAuditScore'];
         const IMAGE_FIELDS = ['送审图片', 'pics', 'reported_pic', 'image_urls', 'imageUrls', 'images', '图片', '主图', '商品图片'];
         const SPEC_FIRST_IMAGE_FIELDS = ['规格首图', 'spec_first_image', 'spec_first_images', 'specFirstImage', 'specFirstImages', 'cspu_img_urls', '规格图'];
+        const REVIEW_STATUS_FIELDS = ['审核状态', '复审结果', '是否通过', '审核结果', 'review_status', 'reviewStatus', 'review_result', 'label', 'status'];
         const REVIEW_STATE_FIELDS = new Set([
             'review_status',
             'reviewStatus',
@@ -2036,7 +2099,7 @@
         }
 
         function normalizeRecord(row, index) {
-            const reviewStatus = row.review_status || row.reviewStatus || row.review_result || row.label || row['复审结果'] || '';
+            const reviewStatus = firstPresent(row, REVIEW_STATUS_FIELDS);
             const preAuditScore = normalizePreAuditScore(firstPresent(row, PRE_AUDIT_SCORE_FIELDS));
             const specFirstImages = splitImageUrls(firstPresent(row, SPEC_FIRST_IMAGE_FIELDS));
             const labelApplyId = String(firstPresent(row, LABEL_APPLY_ID_FIELDS)).trim();
@@ -2070,8 +2133,8 @@
                 healthLevel: String(row.health_level || row.health_score_level || row['健康分等级'] || '').trim(),
                 skuImages: splitImageUrls(row.sku_images || row.sku_pics || row['SKU规格图'] || ''),
                 reviewStatus: normalizeStatus(reviewStatus),
-                reviewReason: String(row.review_reason || row.label_remark || row['不通过原因'] || '').trim(),
-                reviewTime: String(row.review_time || row.label_time || row['复审时间'] || '').trim(),
+                reviewReason: String(row.review_reason || row.label_remark || row['审核备注'] || row['不通过原因'] || '').trim(),
+                reviewTime: String(row.review_time || row.label_time || row['审核时间'] || row['复审时间'] || '').trim(),
                 handlerName: String(row['处理人'] || row.handler || row.reviewer || row['审核人'] || '').trim(),
             };
 
@@ -2095,13 +2158,18 @@
             return record;
         }
 
-        const STATUS_APPROVED = new Set(['approved', 'pass', 'correct', '通过', '审核通过']);
-        const STATUS_REJECTED = new Set(['rejected', 'fail', 'incorrect', '不通过', '审核不通过']);
+        const STATUS_APPROVED = new Set(['approved', 'approve', 'pass', 'passed', 'correct', 'true', 'yes', 'y', '1', '通过', '已通过', '审核通过', '复审通过', '是']);
+        const STATUS_REJECTED = new Set(['rejected', 'reject', 'fail', 'failed', 'incorrect', 'false', 'no', 'n', '0', '不通过', '未通过', '已不通过', '审核不通过', '复审不通过', '否', '驳回', '拒绝']);
 
         function normalizeStatus(value) {
-            const text = String(value || '').trim();
-            if (STATUS_APPROVED.has(text)) return 'approved';
-            if (STATUS_REJECTED.has(text)) return 'rejected';
+            let text = String(value || '').trim();
+            if (!text) return '';
+            const compact = text.replace(/\s+/g, '').replace(/：/g, ':');
+            const lower = compact.toLowerCase();
+            if (STATUS_APPROVED.has(compact) || STATUS_APPROVED.has(lower)) return 'approved';
+            if (STATUS_REJECTED.has(compact) || STATUS_REJECTED.has(lower)) return 'rejected';
+            if (/不通过|未通过|拒绝|驳回|reject|fail/i.test(compact)) return 'rejected';
+            if (/通过|approved|approve|pass|correct/i.test(compact)) return 'approved';
             return '';
         }
 
@@ -3400,10 +3468,39 @@
                     const textEl = overlay.querySelector('.loading-text');
                     if (textEl) textEl.textContent = text;
                 }
+
+                let track = overlay.querySelector('.loading-progress-track');
+                if (!track) {
+                    track = document.createElement('div');
+                    track.className = 'loading-progress-track';
+                    const bar = document.createElement('div');
+                    bar.className = 'loading-progress-bar';
+                    track.appendChild(bar);
+                    overlay.appendChild(track);
+                }
+
+                let detail = overlay.querySelector('.loading-progress-detail');
+                if (!detail) {
+                    detail = document.createElement('div');
+                    detail.className = 'loading-progress-detail';
+                    overlay.appendChild(detail);
+                }
+
+                const countdownText = countdown != null ? String(countdown) : '';
                 const countdownEl = document.getElementById('loading-countdown');
                 if (countdownEl) {
-                    countdownEl.textContent = countdown != null ? countdown : '';
+                    const percentMatch = countdownText.match(/\d+(?:\.\d+)?%/);
+                    countdownEl.textContent = percentMatch ? percentMatch[0] : countdownText;
                 }
+
+                const bar = overlay.querySelector('.loading-progress-bar');
+                const percentMatch = countdownText.match(/(\d+(?:\.\d+)?)%/);
+                if (bar) {
+                    const percent = percentMatch ? Math.max(0, Math.min(100, Number(percentMatch[1]))) : 0;
+                    bar.style.width = percent + '%';
+                }
+                detail.textContent = countdownText;
+
                 overlay.classList.remove('fade-out');
             }
         }

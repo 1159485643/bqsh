@@ -28,6 +28,13 @@ export async function onRequestPost({ request }) {
       return json({ ok:true, headers, rows, parsed:meta });
     }
 
+    if (action === "getPage") {
+      const start = Math.max(2, Number(body.start || 2));
+      const pageSize = Math.max(50, Math.min(1000, Number(body.pageSize || 500)));
+      const page = await readPage(accessToken, meta.spreadsheetToken, sheetId, start, pageSize);
+      return json({ ok:true, ...page, parsed:meta });
+    }
+
     if (action === "claim") {
       const result = await claimRows(accessToken, meta.spreadsheetToken, sheetId, config.handlerName || "", Number(count || 20));
       return json({ ok:true, count:result.rows.length, rows:result.rows });
@@ -262,6 +269,43 @@ async function readAll(accessToken, spreadsheetToken, sheetId){
   return { headers, rows };
 }
 
+
+async function readPage(accessToken, spreadsheetToken, sheetId, start, pageSize){
+  const headerResult = await readHeaders(accessToken, spreadsheetToken, sheetId);
+  const headers = headerResult.headers || [];
+  const pageSizeRef = { value:pageSize };
+
+  while (true) {
+    const end = start + pageSizeRef.value - 1;
+    const range = `${sheetId}!A${start}:ZZ${end}`;
+    const result = await readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef);
+    if (result.retry) continue;
+
+    const values = result.values || [];
+    const rows = [];
+
+    values.forEach((r, i) => {
+      const normalized = (r || []).map(normalizeCellValue);
+      const hasContent = normalized.some(cell => String(cell ?? "").trim() !== "");
+      if (!hasContent) return;
+      const obj = { __rowIndex:start + i };
+      headers.forEach((h, idx)=>{ if(h) obj[h] = normalized[idx] ?? ""; });
+      rows.push(obj);
+    });
+
+    const done = values.length < pageSizeRef.value || !values.length;
+    return {
+      headers,
+      rows,
+      start,
+      pageSize:pageSizeRef.value,
+      nextStart:start + pageSizeRef.value,
+      done,
+      scanned:values.length
+    };
+  }
+}
+
 async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, count){
   if (!handlerName) throw new Error("处理人姓名不能为空");
 
@@ -271,9 +315,10 @@ async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, co
   const handlerCol = ensureHeader(headers, "处理人");
   const statusCol = ensureHeader(headers, "审核状态");
   const claimed = [];
+  const valueRanges = [];
 
   let start = 2;
-  const pageSizeRef = { value:250 };
+  const pageSizeRef = { value:500 };
   let emptyBlocks = 0;
 
   while (claimed.length < count) {
@@ -296,9 +341,13 @@ async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, co
       const status = String(normalized[statusCol - 1] || "").trim();
 
       if (!handler && (!status || status === "待审核" || status === "未复审")) {
-        await updateCells(accessToken, spreadsheetToken, sheetId, rowIndex, {
-          [handlerCol]: handlerName,
-          [statusCol]: status || "待审核"
+        valueRanges.push({
+          range:`${sheetId}!${colName(handlerCol)}${rowIndex}:${colName(handlerCol)}${rowIndex}`,
+          values:[[handlerName]]
+        });
+        valueRanges.push({
+          range:`${sheetId}!${colName(statusCol)}${rowIndex}:${colName(statusCol)}${rowIndex}`,
+          values:[[status || "待审核"]]
         });
         claimed.push(rowIndex);
       }
@@ -313,8 +362,11 @@ async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, co
 
     if (values.length < pageSizeRef.value) break;
     start += pageSizeRef.value;
-
     if (start > 200000) break;
+  }
+
+  if (valueRanges.length) {
+    await batchUpdateValues(accessToken, spreadsheetToken, valueRanges);
   }
 
   return { rows:claimed };
@@ -322,8 +374,11 @@ async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, co
 
 function normalizeReviewStatus(status){
   const text = String(status || "").trim();
-  if (text === "approved" || text === "通过") return "通过";
-  if (text === "rejected" || text === "不通过") return "不通过";
+  const compact = text.replace(/\s+/g, "").toLowerCase();
+  if (["approved","approve","pass","passed","correct","true","yes","y","1","通过","已通过","审核通过","复审通过","是"].includes(compact)) return "通过";
+  if (["rejected","reject","fail","failed","incorrect","false","no","n","0","不通过","未通过","已不通过","审核不通过","复审不通过","否","驳回","拒绝"].includes(compact)) return "不通过";
+  if (/不通过|未通过|拒绝|驳回|reject|fail/i.test(text)) return "不通过";
+  if (/通过|approved|approve|pass|correct/i.test(text)) return "通过";
   return text || "待审核";
 }
 
@@ -372,6 +427,23 @@ function colName(n){
     n = Math.floor((n - 1) / 26);
   }
   return s;
+}
+
+async function batchUpdateValues(accessToken, spreadsheetToken, valueRanges){
+  const chunks = [];
+  for (let i = 0; i < valueRanges.length; i += 100) {
+    chunks.push(valueRanges.slice(i, i + 100));
+  }
+
+  for (const chunk of chunks) {
+    const res = await fetch(`https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values_batch_update`, {
+      method:"POST",
+      headers:{ Authorization:`Bearer ${accessToken}`, "Content-Type":"application/json; charset=utf-8" },
+      body: JSON.stringify({ valueRanges:chunk })
+    });
+    const data = await res.json();
+    if (data.code !== 0) throw new Error(`批量写回表格失败：${data.msg || data.code}`);
+  }
 }
 
 async function updateCells(accessToken, spreadsheetToken, sheetId, rowIndex, colValueMap){
