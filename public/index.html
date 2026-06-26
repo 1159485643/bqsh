@@ -1,7 +1,16 @@
 <!DOCTYPE html>
 <html lang="zh">
-<head><meta charset="UTF-8"><title>V3飞书系统</title></head>
+<head>
+<meta charset="UTF-8">
+<title>飞书审核系统V3</title>
+<style>
+body{font-family:Arial;background:#f6f7f9;padding:20px}
+.card{background:#fff;border:1px solid #ddd;padding:10px;margin:10px 0}
+button{margin-right:5px}
+</style>
+</head>
 <body>
+
 <h2>飞书审核系统V3</h2>
 
 AppID <input id="appId"><br>
@@ -9,53 +18,87 @@ AppSecret <input id="appSecret"><br>
 处理人 <input id="user"><br>
 飞书链接 <input id="url" style="width:400px"><br>
 
-<button onclick="connect()">加载</button>
+<button onclick="load()">加载</button>
+
+<hr>
 
 <div id="list"></div>
 
 <script>
-let state={user:"",list:[]};
+let state={user:"",data:[]};
 
-async function connect(){
- state.user=document.getElementById("user").value;
+async function load(){
+ state.user=user.value;
 
- const res=await fetch("/api/feishu",{method:"POST",
+ const res=await fetch("/api/feishu",{
+ method:"POST",
  headers:{"Content-Type":"application/json"},
  body:JSON.stringify({
  appId:appId.value,
  appSecret:appSecret.value,
  url:url.value,
  action:"get"
- })});
+ })
+ });
 
  const d=await res.json();
- state.list=d.list||[];
+ state.data=d.data||[];
+ render();
+}
+
+async function claim(i){
+ state.data[i].user=state.user;
+
+ await fetch("/api/feishu",{
+ method:"POST",
+ headers:{"Content-Type":"application/json"},
+ body:JSON.stringify({
+ action:"update",
+ row:state.data[i],
+ appId:appId.value,
+ appSecret:appSecret.value,
+ url:url.value
+ })
+ });
+
+ render();
+}
+
+async function pass(i){
+ state.data[i].status="通过";
+
+ await fetch("/api/feishu",{
+ method:"POST",
+ headers:{"Content-Type":"application/json"},
+ body:JSON.stringify({
+ action:"update",
+ row:state.data[i],
+ appId:appId.value,
+ appSecret:appSecret.value,
+ url:url.value
+ })
+ });
+
  render();
 }
 
 function render(){
  const el=document.getElementById("list");
  el.innerHTML="";
- state.list.forEach((x,i)=>{
+ state.data.forEach((item,i)=>{
  const div=document.createElement("div");
+ div.className="card";
  div.innerHTML=`
- <b>${x.title||""}</b><br>
- 状态:${x.status||"待审核"}<br>
- 处理人:${x.user||""}<br>
+ <b>${item.title||""}</b><br>
+ 状态:${item.status||"待审核"}<br>
+ 处理人:${item.user||""}<br>
  <button onclick="claim(${i})">领取</button>
  <button onclick="pass(${i})">通过</button>
  `;
  el.appendChild(div);
  });
 }
-
-function claim(i){
- state.list[i].user=state.user;
-}
-
-function pass(i){
- state.list[i].status="通过";
-}
 </script>
+
 </body>
 </html>
