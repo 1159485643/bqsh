@@ -3,9 +3,7 @@ export async function onRequestPost({ request }) {
     const body = await request.json();
     const action = body.action;
 
-    if (action === "config") {
-      return json({ ok:true });
-    }
+    if (action === "config") return json({ ok:true });
 
     const appId = body.appId || "";
     const appSecret = body.appSecret || "";
