@@ -31,9 +31,17 @@
   - wiki:node:read
   - sheets:spreadsheet
   - sheets:spreadsheet:read
-  - sheets:spreadsheet:write
 
 ## Cloudflare Pages
 
 - Build command 留空
 - Build output directory 填 public
+
+
+## 本次调整
+
+- 已移除无效 OAuth scope：`sheets:spreadsheet:write`
+- 当前 scope 保留：
+  - `wiki:node:read`
+  - `sheets:spreadsheet`
+  - `sheets:spreadsheet:read`
