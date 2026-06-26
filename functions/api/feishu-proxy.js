@@ -14,32 +14,30 @@ export async function onRequestPost({ request }) {
 
     if (!meta.spreadsheetToken) {
       let msg = "无法从链接解析 spreadsheet token，请确认是飞书 Sheets 链接。";
-      if (meta.baseToken) msg = "当前链接是多维表格 Bitable 链接，不是飞书 Sheets 链接；当前版本读取的是 Sheets。";
-      if (meta.docToken) msg = "当前链接是飞书文档链接，不是飞书 Sheets 链接。请打开电子表格后复制地址栏链接。";
+      if (meta.baseToken) msg = "当前链接是多维表格 Bitable 链接，不是飞书 Sheets 链接。";
+      if (meta.docToken) msg = "当前链接是飞书文档链接，不是飞书 Sheets 链接。";
       if (meta.wikiToken) msg = "当前链接是知识库链接，但没有解析到电子表格对象 token。请确认知识库节点本身是电子表格。";
-      return json({ ok:false, message:msg + "\n\n支持示例：\nhttps://xxx.feishu.cn/sheets/shtxxxx?sheet=xxxx\nhttps://xxx.feishu.cn/wiki/wikxxxx（知识库里的电子表格）" }, 400);
+      return json({ ok:false, message:msg }, 400);
     }
 
     const sheetId = meta.sheetId || await getFirstSheetId(accessToken, meta.spreadsheetToken);
     if (!sheetId) return json({ ok:false, message:"无法获取工作表 sheetId" }, 400);
 
     if (action === "get") {
-      const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId, Number(config.maxRows || 5000));
-      return json({ ok:true, headers, rows, parsed: meta });
+      const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId);
+      return json({ ok:true, headers, rows, parsed:meta });
     }
 
     if (action === "claim") {
-      const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId, Number(config.maxRows || 5000));
-      const handlerField = config.handlerField || "处理人";
-      const statusField = config.statusField || "审核状态";
-      const handlerCol = ensureHeader(headers, handlerField);
-      const statusCol = ensureHeader(headers, statusField);
+      const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId);
+      const handlerCol = ensureHeader(headers, "处理人");
+      const statusCol = ensureHeader(headers, "审核状态");
 
       let claimed = 0;
       for (const row of rows) {
         if (claimed >= Number(count || 20)) break;
-        const h = String(row[handlerField] || "").trim();
-        const s = String(row[statusField] || "").trim();
+        const h = String(row["处理人"] || "").trim();
+        const s = String(row["审核状态"] || "").trim();
         if (!h && (!s || s === "待审核" || s === "未复审")) {
           await updateCells(accessToken, meta.spreadsheetToken, sheetId, row.__rowIndex, {
             [handlerCol]: config.handlerName || "",
@@ -52,17 +50,12 @@ export async function onRequestPost({ request }) {
     }
 
     if (action === "update") {
-      const { headers } = await readAll(accessToken, meta.spreadsheetToken, sheetId, 5);
-      const handlerField = config.handlerField || "处理人";
-      const statusField = config.statusField || "审核状态";
-      const reasonField = config.reasonField || "审核备注";
-      const timeField = config.timeField || "审核时间";
-
+      const { headers } = await readHeaders(accessToken, meta.spreadsheetToken, sheetId);
       const cells = {};
-      cells[ensureHeader(headers, handlerField)] = record.handler || config.handlerName || "";
-      cells[ensureHeader(headers, statusField)] = record.status || "待审核";
-      cells[ensureHeader(headers, reasonField)] = record.reason || "";
-      cells[ensureHeader(headers, timeField)] = record.reviewTime || "";
+      cells[ensureHeader(headers, "处理人")] = record.handler || config.handlerName || "";
+      cells[ensureHeader(headers, "审核状态")] = record.status || "待审核";
+      cells[ensureHeader(headers, "审核备注")] = record.reason || "";
+      cells[ensureHeader(headers, "审核时间")] = record.reviewTime || "";
       await updateCells(accessToken, meta.spreadsheetToken, sheetId, record._rowIndex, cells);
       return json({ ok:true });
     }
@@ -82,20 +75,15 @@ function json(data, status=200){
 
 function cleanInput(input){
   let s = String(input || "").trim();
-
-  // 去掉飞书复制时可能带的尖括号、引号、中文说明文字，只保留 URL 主体
   const urlMatch = s.match(/https?:\/\/[^\s"'<>]+/);
   if (urlMatch) s = urlMatch[0];
 
-  // 处理被 encode 到参数里的 URL
   for (let i = 0; i < 3; i++) {
     try {
       const d = decodeURIComponent(s);
       if (d === s) break;
       s = d;
-    } catch(e) {
-      break;
-    }
+    } catch(e) { break; }
   }
 
   return s.replace(/&amp;/g, "&");
@@ -113,9 +101,6 @@ function parseFeishuUrl(rawUrl){
     docToken: ""
   };
 
-  const searchText = s;
-
-  // 常规飞书 Sheets 链接
   const sheetPatterns = [
     /\/sheets\/([A-Za-z0-9]+)/i,
     /\/sheet\/([A-Za-z0-9]+)/i,
@@ -123,14 +108,13 @@ function parseFeishuUrl(rawUrl){
     /\/spreadsheet\/([A-Za-z0-9]+)/i
   ];
   for (const p of sheetPatterns) {
-    const m = searchText.match(p);
+    const m = s.match(p);
     if (m) {
       meta.spreadsheetToken = m[1];
       break;
     }
   }
 
-  // Query 参数兜底
   try {
     const u = new URL(s);
     meta.sheetId = u.searchParams.get("sheet") || u.searchParams.get("sheetId") || u.searchParams.get("gid") || "";
@@ -139,46 +123,37 @@ function parseFeishuUrl(rawUrl){
       u.searchParams.get("spreadsheetToken") ||
       u.searchParams.get("sheet_token") ||
       "";
-
-    // hash 里有时也会带 sheet
     if (!meta.sheetId && u.hash) {
       const hash = u.hash.replace(/^#/, "");
       const hp = new URLSearchParams(hash.includes("?") ? hash.split("?").pop() : hash);
       meta.sheetId = hp.get("sheet") || hp.get("sheetId") || hp.get("gid") || "";
     }
-
-    // 有些复制链接会把真实地址放在 url/redirect/target 参数里
     const nested = u.searchParams.get("url") || u.searchParams.get("redirect") || u.searchParams.get("target") || u.searchParams.get("link");
     if (nested && !meta.spreadsheetToken) {
       const nestedMeta = parseFeishuUrl(nested);
-      Object.assign(meta, {
-        spreadsheetToken: nestedMeta.spreadsheetToken,
-        sheetId: meta.sheetId || nestedMeta.sheetId,
-        wikiToken: nestedMeta.wikiToken,
-        baseToken: nestedMeta.baseToken,
-        docToken: nestedMeta.docToken
-      });
+      meta.spreadsheetToken = nestedMeta.spreadsheetToken;
+      meta.sheetId = meta.sheetId || nestedMeta.sheetId;
+      meta.wikiToken = nestedMeta.wikiToken;
+      meta.baseToken = nestedMeta.baseToken;
+      meta.docToken = nestedMeta.docToken;
     }
   } catch(e) {}
 
-  // Wiki 知识库链接
-  const wikiMatch = searchText.match(/\/wiki\/([A-Za-z0-9]+)/i);
+  const wikiMatch = s.match(/\/wiki\/([A-Za-z0-9]+)/i);
   if (wikiMatch) meta.wikiToken = wikiMatch[1];
 
-  // 多维表格 / 文档链接，用于给更准确报错
-  const baseMatch = searchText.match(/\/base\/([A-Za-z0-9]+)/i);
+  const baseMatch = s.match(/\/base\/([A-Za-z0-9]+)/i);
   if (baseMatch) meta.baseToken = baseMatch[1];
 
-  const docMatch = searchText.match(/\/(?:docx|docs|doc)\/([A-Za-z0-9]+)/i);
+  const docMatch = s.match(/\/(?:docx|docs|doc)\/([A-Za-z0-9]+)/i);
   if (docMatch) meta.docToken = docMatch[1];
 
-  // 裸 token 兜底
   if (!meta.spreadsheetToken) {
-    const bareSheet = searchText.match(/\b(sht[a-zA-Z0-9]{8,}|shtcn[a-zA-Z0-9]+)\b/);
+    const bareSheet = s.match(/\b(sht[a-zA-Z0-9]{8,}|shtcn[a-zA-Z0-9]+)\b/);
     if (bareSheet) meta.spreadsheetToken = bareSheet[1];
   }
   if (!meta.wikiToken) {
-    const bareWiki = searchText.match(/\b(wik[a-zA-Z0-9]{8,}|wikcn[a-zA-Z0-9]+)\b/);
+    const bareWiki = s.match(/\b(wik[a-zA-Z0-9]{8,}|wikcn[a-zA-Z0-9]+)\b/);
     if (bareWiki) meta.wikiToken = bareWiki[1];
   }
 
@@ -198,7 +173,7 @@ async function resolveWikiSheet(accessToken, meta){
   meta.wikiObjType = node.obj_type || "";
   meta.wikiObjToken = node.obj_token || "";
 
-  if (node.obj_type === "sheet" && node.obj_token) {
+  if ((node.obj_type === "sheet" || node.obj_type === "sheets") && node.obj_token) {
     meta.spreadsheetToken = node.obj_token;
   }
 
@@ -214,20 +189,45 @@ async function getFirstSheetId(accessToken, spreadsheetToken){
   return data.data?.sheets?.[0]?.sheet_id || data.data?.sheets?.[0]?.sheetId || "";
 }
 
-async function readAll(accessToken, spreadsheetToken, sheetId, maxRows){
-  const safeMax = Math.min(Math.max(Number(maxRows || 5000), 10), 50000);
-  const range = `${sheetId}!A1:ZZ${safeMax}`;
+async function readHeaders(accessToken, spreadsheetToken, sheetId){
+  const range = `${sheetId}!A1:ZZ1`;
   const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
   const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
   const data = await res.json();
-  if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
+  if (data.code !== 0) throw new Error(`读取表头失败：${data.msg || data.code}`);
   const values = data.data?.valueRange?.values || [];
-  const headers = (values[0] || []).map(v => String(v || "").trim());
-  const rows = values.slice(1).map((r, i) => {
+  return { headers:(values[0] || []).map(v => String(v || "").trim()) };
+}
+
+async function readAll(accessToken, spreadsheetToken, sheetId){
+  const pageSize = 5000;
+  let start = 1;
+  let allValues = [];
+
+  while (true) {
+    const end = start + pageSize - 1;
+    const range = `${sheetId}!A${start}:ZZ${end}`;
+    const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
+    const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
+    const data = await res.json();
+    if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
+
+    const values = data.data?.valueRange?.values || [];
+    const hasContent = values.some(row => (row || []).some(cell => String(cell ?? "").trim() !== ""));
+    if (!hasContent) break;
+
+    allValues = allValues.concat(values);
+    if (values.length < pageSize) break;
+    start += pageSize;
+  }
+
+  const headers = (allValues[0] || []).map(v => String(v || "").trim());
+  const rows = allValues.slice(1).map((r, i) => {
     const obj = { __rowIndex:i+2 };
     headers.forEach((h, idx)=>{ if(h) obj[h] = r[idx] ?? ""; });
     return obj;
   }).filter(row => Object.keys(row).some(k => k !== "__rowIndex" && String(row[k] || "").trim()));
+
   return { headers, rows };
 }
 

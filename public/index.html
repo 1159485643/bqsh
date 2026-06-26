@@ -8,7 +8,7 @@
 :root{
   --bg:#151821;--panel:#1d2430;--panel2:#242d3b;--line:#344154;
   --text:#edf2f7;--muted:#9aa8ba;--blue:#4f9cf9;--green:#43c67a;
-  --red:#ff6678;--amber:#f5b84b;--chip:#111721
+  --red:#ff6678;--amber:#f5b84b
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font-family:"Microsoft YaHei",Arial,sans-serif;font-size:14px}
@@ -22,11 +22,11 @@ button{cursor:pointer}
 h1{margin:0;font-size:20px;line-height:1.2}
 .sub{margin-top:5px;color:var(--muted);font-size:12px}
 .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
-.btn,.file-label{
+.btn{
   min-height:34px;padding:7px 13px;border:1px solid var(--line);border-radius:5px;background:#1d2430;
-  color:#d8e7fb;box-shadow:none;text-decoration:none;display:inline-flex;align-items:center
+  color:#d8e7fb;text-decoration:none;display:inline-flex;align-items:center
 }
-.btn:hover,.file-label:hover{border-color:var(--blue);background:#202b3a}
+.btn:hover{border-color:var(--blue);background:#202b3a}
 .btn.primary{background:#265fb9;border-color:#3b82f6;color:white}
 .btn.ok{border-color:#43c67a;color:#73e49d}
 .btn.bad{border-color:#ff6678;color:#ff6678}
@@ -118,7 +118,7 @@ h1{margin:0;font-size:20px;line-height:1.2}
       <span id="loginText">未授权</span>
       <span class="badge" id="appText">App：未填写</span>
     </div>
-    <div class="hint">点击“飞书授权登录”会打开页面内窗口，填写 App ID / App Secret，并保存到本机浏览器。</div>
+    <div class="hint">授权信息和数据源设置都会保存在本机浏览器。</div>
   </section>
 
   <section class="filters">
@@ -169,10 +169,7 @@ h1{margin:0;font-size:20px;line-height:1.2}
       <label>App Secret
         <input id="authAppSecret" class="control" type="password" placeholder="飞书应用 App Secret">
       </label>
-      <label>授权范围 Scope（可不填）
-        <input id="authScope" class="control" placeholder="可选">
-      </label>
-      <div class="hint">回调地址填当前页面地址：<b id="callbackText"></b></div>
+      <div class="hint">回调地址填当前页面地址：<b id="callbackText"></b><br>系统会自动申请权限：wiki:node:read / sheets:spreadsheet</div>
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
         <button class="btn" id="saveAuth">只保存</button>
         <button class="btn primary" id="startAuth">保存并授权</button>
@@ -188,13 +185,16 @@ h1{margin:0;font-size:20px;line-height:1.2}
       <button class="btn" id="closeSettings">关闭</button>
     </div>
     <div class="modal-body">
-      <label>飞书链接<input id="feishuUrl" class="control" placeholder="粘贴飞书 Sheets 链接"></label>
-      <label>处理人<input id="handlerName" class="control" placeholder="例如：张三"></label>
-      <label>处理人列名<input id="handlerField" class="control" value="处理人"></label>
-      <label>审核状态列名<input id="statusField" class="control" value="审核状态"></label>
-      <label>审核备注列名<input id="reasonField" class="control" value="审核备注"></label>
-      <label>审核时间列名<input id="timeField" class="control" value="审核时间"></label>
-      <label>读取最大行数<input id="maxRows" class="control" value="5000"></label>
+      <label>飞书链接
+        <input id="feishuUrl" class="control" placeholder="粘贴飞书链接">
+      </label>
+      <label>处理人姓名
+        <input id="handlerName" class="control" placeholder="例如：张三">
+      </label>
+      <div class="hint">
+        固定读取整张表，不限制最大行数。<br>
+        固定字段：处理人 / 审核状态 / 审核备注 / 审核时间。
+      </div>
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
         <button class="btn primary" id="saveSettings">保存设置</button>
       </div>
@@ -207,11 +207,19 @@ h1{margin:0;font-size:20px;line-height:1.2}
 <script>
 const cfgKey = "star-risk-review-v3-oauth-config";
 const tokenKey = "star-risk-review-v3-oauth-token";
+const REQUIRED_SCOPE = "wiki:node:read sheets:spreadsheet";
 const $ = id => document.getElementById(id);
 
 let allRecords = [];
 let viewRecords = [];
 let currentPage = 0;
+
+const fixed = {
+  handlerField: "处理人",
+  statusField: "审核状态",
+  reasonField: "审核备注",
+  timeField: "审核时间"
+};
 
 const fields = {
   title:["商品标题","标题","spu_title","title"],
@@ -264,21 +272,15 @@ function loadConfigToUI(){
   $("claimCount").value=c.claimCount||20;
   $("authAppId").value=c.appId||"";
   $("authAppSecret").value=c.appSecret||"";
-  $("authScope").value=c.scope||"";
   $("feishuUrl").value=c.feishuUrl||"";
   $("handlerName").value=c.handlerName||"";
-  $("handlerField").value=c.handlerField||"处理人";
-  $("statusField").value=c.statusField||"审核状态";
-  $("reasonField").value=c.reasonField||"审核备注";
-  $("timeField").value=c.timeField||"审核时间";
-  $("maxRows").value=c.maxRows||5000;
   $("callbackText").textContent=redirectUri();
 }
 function saveAuthConfig(){
   const c = saveConfigPatch({
     appId:norm($("authAppId").value),
     appSecret:norm($("authAppSecret").value),
-    scope:norm($("authScope").value)
+    scope:REQUIRED_SCOPE
   });
   updateLoginUI();
   toast("授权信息已保存");
@@ -288,11 +290,6 @@ function saveSettingsConfig(){
   const c = saveConfigPatch({
     feishuUrl:norm($("feishuUrl").value),
     handlerName:norm($("handlerName").value),
-    handlerField:norm($("handlerField").value)||"处理人",
-    statusField:norm($("statusField").value)||"审核状态",
-    reasonField:norm($("reasonField").value)||"审核备注",
-    timeField:norm($("timeField").value)||"审核时间",
-    maxRows:norm($("maxRows").value)||"5000",
     claimCount:norm($("claimCount").value)||"20"
   });
   toast("数据源设置已保存");
@@ -343,13 +340,15 @@ function startAuth(){
     alert("请填写 App ID 和 App Secret");
     return;
   }
+  localStorage.removeItem(tokenKey);
+
   const state = Math.random().toString(36).slice(2) + Date.now();
   sessionStorage.setItem("feishu_oauth_state", state);
   const u = new URL("https://open.feishu.cn/open-apis/authen/v1/authorize");
   u.searchParams.set("app_id", c.appId);
   u.searchParams.set("redirect_uri", redirectUri());
   u.searchParams.set("state", state);
-  if(c.scope) u.searchParams.set("scope", c.scope);
+  u.searchParams.set("scope", REQUIRED_SCOPE);
   location.href = u.toString();
 }
 async function handleOAuthCallback(){
@@ -414,8 +413,7 @@ function updateLoginUI(){
 }
 
 function mapRecord(row, idx){
-  const c=config();
-  const status = norm(row[c.statusField] || row["是否通过"] || row["复审结果"] || row["review_status"]);
+  const status = norm(row[fixed.statusField] || row["是否通过"] || row["复审结果"] || row["review_status"]);
   return {
     _raw: row,
     _rowIndex: row.__rowIndex ?? idx+2,
@@ -437,10 +435,10 @@ function mapRecord(row, idx){
     community:getBy(row,fields.community),
     external:getBy(row,fields.external),
     applyType:getBy(row,fields.applyType),
-    handler:norm(row[c.handlerField]),
+    handler:norm(row[fixed.handlerField]),
     status: status || "待审核",
-    reason:norm(row[c.reasonField]),
-    reviewTime:norm(row[c.timeField])
+    reason:norm(row[fixed.reasonField]),
+    reviewTime:norm(row[fixed.timeField])
   };
 }
 function fillSelect(id, values){
@@ -576,7 +574,7 @@ async function claimOne(idx){
   const r=allRecords[idx];
   const c=config();
   if(!c.handlerName){
-    alert("请先设置处理人");
+    alert("请先设置处理人姓名");
     return;
   }
   r.handler=c.handlerName;
@@ -588,7 +586,7 @@ async function markOne(idx,status){
   const r=allRecords[idx];
   const c=config();
   if(!c.handlerName){
-    alert("请先设置处理人");
+    alert("请先设置处理人姓名");
     return;
   }
   r.handler=r.handler||c.handlerName;
@@ -613,7 +611,7 @@ async function claimBatch(){
   const c=config();
   const n=Math.max(1,Number($("claimCount").value)||20);
   if(!c.handlerName){
-    alert("请先设置处理人");
+    alert("请先设置处理人姓名");
     return;
   }
   try{
