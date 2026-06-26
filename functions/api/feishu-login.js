@@ -10,22 +10,24 @@ export async function onRequestGet({ request, env }) {
     url.searchParams.set("app_id", appId);
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("state", state);
-    url.searchParams.set("scope", "wiki:node:read sheets:spreadsheet");
 
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "Location": url.toString(),
-        "Set-Cookie": cookie("feishu_oauth_state", state, 600)
-      }
-    });
+    // 飞书 OAuth 文档要求 scope 使用空格分隔；这里允许 Cloudflare 变量 FEISHU_OAUTH_SCOPE 覆盖。
+    // 默认只请求本工具需要的用户身份权限。
+    const scope = (env.FEISHU_OAUTH_SCOPE || "wiki:node:read sheets:spreadsheet").trim();
+    if (scope) url.searchParams.set("scope", scope);
+
+    const headers = new Headers();
+    headers.set("Location", url.toString());
+    headers.append("Set-Cookie", cookie("feishu_oauth_state", state, 600));
+
+    return new Response(null, { status: 302, headers });
   } catch (e) {
     return text(e.message || String(e), 500);
   }
 }
 
 function getRedirectUri(request, env) {
-  if (env.FEISHU_REDIRECT_URI) return env.FEISHU_REDIRECT_URI;
+  if (env.FEISHU_REDIRECT_URI) return env.FEISHU_REDIRECT_URI.trim();
   const u = new URL(request.url);
   return `${u.origin}/api/feishu-oauth-callback`;
 }

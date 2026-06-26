@@ -1718,6 +1718,7 @@
 
             if (loginError) {
                 alert('飞书登录失败：' + decodeURIComponent(loginError));
+                hideLoading();
                 history.replaceState({}, '', redirectUri());
                 return;
             }

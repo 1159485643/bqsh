@@ -11,10 +11,14 @@ export async function onRequestGet({ request, env }) {
     const state = url.searchParams.get("state");
     const savedState = getCookie(request, "feishu_oauth_state");
 
-    if (!code) throw new Error("缺少授权 code");
-    if (!state || !savedState || state !== savedState) throw new Error("OAuth state 校验失败，请重新登录");
+    if (!code) {
+      throw new Error("缺少授权 code：请从页面点击“飞书登录”，不要直接打开 callback 地址");
+    }
+    if (!state || !savedState || state !== savedState) {
+      throw new Error("OAuth state 校验失败，请重新点击“飞书登录”");
+    }
 
-    const redirectUri = env.FEISHU_REDIRECT_URI || `${origin}/api/feishu-oauth-callback`;
+    const redirectUri = (env.FEISHU_REDIRECT_URI || `${origin}/api/feishu-oauth-callback`).trim();
     const token = await tokenRequest({
       grant_type: "authorization_code",
       client_id: env.FEISHU_APP_ID,
@@ -40,25 +44,18 @@ export async function onRequestGet({ request, env }) {
       expirationTtl: 60 * 60 * 24 * 30
     });
 
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "Location": `${origin}/?feishu_login=success`,
-        "Set-Cookie": [
-          clearCookie("feishu_oauth_state"),
-          cookie("feishu_session", sessionId, 60 * 60 * 24 * 30)
-        ].join(", ")
-      }
-    });
+    const headers = new Headers();
+    headers.set("Location", `${origin}/?feishu_login=success`);
+    headers.append("Set-Cookie", clearCookie("feishu_oauth_state"));
+    headers.append("Set-Cookie", cookie("feishu_session", sessionId, 60 * 60 * 24 * 30));
+
+    return new Response(null, { status: 302, headers });
   } catch (e) {
     const msg = encodeURIComponent(e.message || String(e));
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "Location": `${origin}/?feishu_error=${msg}`,
-        "Set-Cookie": clearCookie("feishu_oauth_state")
-      }
-    });
+    const headers = new Headers();
+    headers.set("Location", `${origin}/?feishu_error=${msg}`);
+    headers.append("Set-Cookie", clearCookie("feishu_oauth_state"));
+    return new Response(null, { status: 302, headers });
   }
 }
 
@@ -68,7 +65,7 @@ async function tokenRequest(payload) {
     headers: { "Content-Type": "application/json; charset=utf-8" },
     body: JSON.stringify(payload)
   });
-  const raw = await res.json();
+  const raw = await res.json().catch(() => ({}));
   const data = raw.data || raw;
   if (!res.ok || raw.error || raw.code) {
     throw new Error(raw.error_description || raw.message || raw.msg || `OAuth token 接口失败：${res.status}`);

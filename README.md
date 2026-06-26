@@ -1,43 +1,39 @@
-# 明星同款舆情风险复审 V3 - SaaS KV 登录版
+# 明星同款舆情风险复审 V3 - SaaS OAuth 最终修正版
 
-## 这版改动
+## 本次修复
 
-- 前端已去掉 App ID / App Secret 输入。
-- 用户只需要点击“飞书登录”。
-- OAuth 登录由 Cloudflare Functions 处理。
-- token 存入 Cloudflare KV，按浏览器 session 隔离。
-- 前端不再保存 user_access_token。
-- feishu-proxy 自动从 cookie + KV 获取 token，并在需要时刷新。
-- 保留之前稳定版能力：
-  - 手动同步基础数据
-  - 后台只同步动态字段：处理人 / 审核状态 / 审核备注 / 审核时间
-  - 5秒周期批量回写
-  - 防请求过多退避
-  - 原 UI、图片预览、不通过快捷原因、不通过原因不能为空校验
-  - 处理人筛选、Excel 合并按钮、领取按钮内进度
+- 修复 OAuth callback 里多个 Set-Cookie 合并写入导致 session cookie 可能丢失的问题。
+- callback 写 session 后分别写入：
+  - feishu_oauth_state 清理 cookie
+  - feishu_session 登录 cookie
+- /api/feishu-login 使用 URLSearchParams 统一编码 redirect_uri / state / scope。
+- scope 保留飞书官方空格分隔格式，支持用 Cloudflare 变量 FEISHU_OAUTH_SCOPE 覆盖。
+- callback 没有 code 时给出明确提示：必须从页面点击“飞书登录”，不能直接打开 callback 地址。
+- 保留 SaaS KV 登录、多用户隔离、自动刷新 token、后台动态同步、5秒周期批量回写等稳定版能力。
 
-## Cloudflare 需要配置
+## Cloudflare 需要保证已有
 
-Variables and secrets 中你只需要保证已有：
+Variables and secrets：
 
 - FEISHU_APP_ID
 - FEISHU_APP_SECRET
 - FEISHU_REDIRECT_URI
 
-KV 已写入 wrangler.toml：
+wrangler.toml 已包含：
 
-- binding: FEISHU_KV
-- id: 576f4e274ed64404a9519cce09f764dc
+- FEISHU_KV = 576f4e274ed64404a9519cce09f764dc
 
-## 飞书后台回调地址
+## 飞书后台重定向 URL
 
-必须和 Cloudflare 的 FEISHU_REDIRECT_URI 完全一致，例如：
+必须存在且完全一致：
 
-https://你的域名/api/feishu-oauth-callback
+https://bqsh.pages.dev/api/feishu-oauth-callback
 
-## Cloudflare Pages
+## 部署
+
+Cloudflare Pages：
 
 - Build command 留空
 - Build output directory 填 public
 
-改完变量和 wrangler.toml 后需要重新部署。
+重新上传/部署后，清理浏览器 cookie，再从页面点击“飞书登录”。
