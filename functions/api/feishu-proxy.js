@@ -36,6 +36,13 @@ export async function onRequestPost({ request }) {
       return json({ ok:true, ...page, totalRows:sheetInfo.rowCount || 0, parsed:meta });
     }
 
+    if (action === "getDynamicPage") {
+      const start = Math.max(2, Number(body.start || 2));
+      const pageSize = Math.max(500, Math.min(5000, Number(body.pageSize || 4000)));
+      const page = await readDynamicPage(accessToken, meta.spreadsheetToken, sheetId, start, pageSize, sheetInfo.rowCount || 0);
+      return json({ ok:true, ...page, totalRows:sheetInfo.rowCount || 0, parsed:meta });
+    }
+
     if (action === "claim") {
       const result = await claimRows(accessToken, meta.spreadsheetToken, sheetId, config.handlerName || "", Number(count || 20), Math.max(500, Math.min(5000, Number(body.pageSize || 4000))));
       return json({ ok:true, count:result.rows.length, rows:result.rows });
@@ -254,15 +261,26 @@ async function readHeaders(accessToken, spreadsheetToken, sheetId){
 
 async function readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef){
   const url = `https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values/${encodeURIComponent(range)}`;
-  const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
-  const data = await res.json();
-  const msg = String(data.msg || data.message || "");
-  if (data.code !== 0 && /exceeded|10485760|too large/i.test(msg) && pageSizeRef.value > 500) {
-    pageSizeRef.value = Math.max(500, Math.floor(pageSizeRef.value / 2));
-    return { retry:true };
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
+    const data = await res.json();
+    const msg = String(data.msg || data.message || "");
+
+    if (data.code === 0) return { retry:false, values:data.data?.valueRange?.values || [] };
+
+    if (/exceeded|10485760|too large/i.test(msg) && pageSizeRef.value > 500) {
+      pageSizeRef.value = Math.max(500, Math.floor(pageSizeRef.value / 2));
+      return { retry:true };
+    }
+
+    if (attempt < 3 && isRateLimitedResponse(res, data)) {
+      await workerSleep(800 * attempt);
+      continue;
+    }
+
+    throw new Error(`读取表格失败：${data.msg || data.code}`);
   }
-  if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
-  return { retry:false, values:data.data?.valueRange?.values || [] };
 }
 
 async function readAll(accessToken, spreadsheetToken, sheetId){
@@ -345,6 +363,53 @@ async function readPage(accessToken, spreadsheetToken, sheetId, start, pageSize)
       scanned:values.length
     };
   }
+}
+
+
+async function readColumnValues(accessToken, spreadsheetToken, sheetId, colIndex, start, end){
+  if (!colIndex) return [];
+  const col = colName(colIndex);
+  const range = `${sheetId}!${col}${start}:${col}${end}`;
+  const pageSizeRef = { value:Math.max(1, end - start + 1) };
+  while (true) {
+    const result = await readRangeWithRetry(accessToken, spreadsheetToken, range, pageSizeRef);
+    if (!result.retry) {
+      return (result.values || []).map(row => normalizeCellValue((row || [])[0] || ""));
+    }
+  }
+}
+
+async function readDynamicPage(accessToken, spreadsheetToken, sheetId, start, pageSize, totalRows){
+  const { headers } = await readHeaders(accessToken, spreadsheetToken, sheetId);
+  const fields = ["处理人", "审核状态", "审核备注", "审核时间"];
+  const colMap = {};
+  fields.forEach(name => {
+    const idx = headers.indexOf(name);
+    colMap[name] = idx >= 0 ? idx + 1 : 0;
+  });
+
+  const lastRow = totalRows ? Math.min(totalRows, start + pageSize - 1) : start + pageSize - 1;
+  const count = Math.max(0, lastRow - start + 1);
+  const rows = Array.from({ length:count }, (_, i) => ({ __rowIndex:start + i }));
+
+  for (const name of fields) {
+    if (!colMap[name]) continue;
+    const values = await readColumnValues(accessToken, spreadsheetToken, sheetId, colMap[name], start, lastRow);
+    for (let i = 0; i < count; i++) {
+      rows[i][name] = values[i] || "";
+    }
+  }
+
+  const done = totalRows ? lastRow >= totalRows : count < pageSize;
+  return {
+    headers:fields,
+    rows,
+    start,
+    pageSize,
+    nextStart:lastRow + 1,
+    done,
+    scanned:count
+  };
 }
 
 async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, count, claimPageSize = 4000){
@@ -494,6 +559,15 @@ function colName(n){
   return s;
 }
 
+async function workerSleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRateLimitedResponse(res, data){
+  const msg = String((data && (data.msg || data.message)) || "");
+  return res.status === 429 || /too many|rate|频繁|请求过多|TooMany/i.test(msg);
+}
+
 async function batchUpdateValues(accessToken, spreadsheetToken, valueRanges){
   const chunks = [];
   for (let i = 0; i < valueRanges.length; i += 100) {
@@ -501,13 +575,23 @@ async function batchUpdateValues(accessToken, spreadsheetToken, valueRanges){
   }
 
   for (const chunk of chunks) {
-    const res = await fetch(`https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values_batch_update`, {
-      method:"POST",
-      headers:{ Authorization:`Bearer ${accessToken}`, "Content-Type":"application/json; charset=utf-8" },
-      body: JSON.stringify({ valueRanges:chunk })
-    });
-    const data = await res.json();
-    if (data.code !== 0) throw new Error(`批量写回表格失败：${data.msg || data.code}`);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const res = await fetch(`https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/${spreadsheetToken}/values_batch_update`, {
+        method:"POST",
+        headers:{ Authorization:`Bearer ${accessToken}`, "Content-Type":"application/json; charset=utf-8" },
+        body: JSON.stringify({ valueRanges:chunk })
+      });
+      const data = await res.json();
+
+      if (data.code === 0) break;
+
+      if (attempt < 4 && isRateLimitedResponse(res, data)) {
+        await workerSleep(900 * attempt);
+        continue;
+      }
+
+      throw new Error(`批量写回表格失败：${data.msg || data.code}`);
+    }
   }
 }
 

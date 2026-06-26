@@ -1851,25 +1851,48 @@
             return text.split(/[，,、\n\r\s]+/).filter(Boolean).includes(handler);
         }
 
-        async function feishuSheetApi(action, payload) {
+        let feishuApiChain = Promise.resolve();
+
+        function isRateLimitError(response, data) {
+            const msg = String((data && (data.message || data.msg)) || '');
+            return response.status === 429 || /too many|rate|频繁|请求过多|TooMany/i.test(msg);
+        }
+
+        async function feishuFetchWithRetry(action, payload) {
             const accessToken = await getFeishuAccessToken();
             const config = readFeishuConfig();
-            const response = await fetch('/api/feishu-proxy', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(Object.assign({ action, config, accessToken }, payload || {})),
-            });
-            const text = await response.text();
-            let data;
-            try {
-                data = JSON.parse(text);
-            } catch (error) {
-                throw new Error('接口返回不是 JSON，请检查 Cloudflare Functions 是否部署成功');
-            }
-            if (!response.ok || data.ok === false) {
+
+            for (let attempt = 1; attempt <= 4; attempt++) {
+                const response = await fetch('/api/feishu-proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(Object.assign({ action, config, accessToken }, payload || {})),
+                });
+                const text = await response.text();
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (error) {
+                    throw new Error('接口返回不是 JSON，请检查 Cloudflare Functions 是否部署成功');
+                }
+
+                if (response.ok && data.ok !== false) return data;
+
+                if (attempt < 4 && isRateLimitError(response, data)) {
+                    updateTopSyncStatus(`请求过多，${attempt * 1.2}s 后重试`);
+                    await sleep(1200 * attempt);
+                    continue;
+                }
+
                 throw new Error(data.message || data.msg || `请求失败 ${response.status}`);
             }
-            return data;
+        }
+
+        async function feishuSheetApi(action, payload) {
+            const task = () => feishuFetchWithRetry(action, payload);
+            const run = feishuApiChain.then(task, task);
+            feishuApiChain = run.catch(() => {});
+            return run;
         }
 
         function sleep(ms) {
@@ -1878,7 +1901,7 @@
 
         const FEISHU_SYNC_PAGE_SIZE = 4000;
         const FEISHU_SILENT_SYNC_INTERVAL = 180000;
-        const FEISHU_WRITEBACK_INTERVAL = 3000;
+        const FEISHU_WRITEBACK_INTERVAL = 5000;
         let feishuSilentSyncTimer = null;
         let feishuSilentSyncRunning = false;
         let feishuNextSilentSyncAt = 0;
@@ -1906,7 +1929,7 @@
             const syncText = feishuSilentSyncRunning ? '同步中' : feishuLastSyncText;
             const writeText = reviewWriteRunning ? '回写中' : (queueSize ? `待回写 ${queueSize} 条` : reviewLastWriteText);
             const nextText = feishuNextSilentSyncAt ? `${remain}s 后` : '未启动';
-            line.textContent = `后台同步：${syncText} / 周期 ${Math.round(FEISHU_SILENT_SYNC_INTERVAL / 1000)}s / 下次 ${nextText} / ${writeText}${extra ? ' / ' + extra : ''}`;
+            line.textContent = `后台动态同步：${syncText} / 周期 ${Math.round(FEISHU_SILENT_SYNC_INTERVAL / 1000)}s / 下次 ${nextText} / ${writeText}${extra ? ' / ' + extra : ''}`;
         }
 
         function startTopStatusTicker() {
@@ -1990,13 +2013,9 @@
             while (true) {
                 if (showProgress) {
                     const p = calcSyncPercent(start, 0, totalRows, batch);
-                    showLoading(`正在同步飞书数据：第 ${batch + 1} 批`, `${p}% · 已读取 ${rows.length} 行 · 每批约 ${pageSize} 行`);
+                    showLoading(`正在同步基础数据：第 ${batch + 1} 批`, `${p}% · 已读取 ${rows.length} 行 · 每批约 ${pageSize} 行`);
                 }
 
-                if (!showProgress) {
-                    feishuLastSyncText = `后台同步中，已读 ${rows.length} 行`;
-                    updateTopSyncStatus();
-                }
                 const data = await feishuSheetApi('getPage', { start, pageSize });
                 const pageRows = data.rows || [];
                 totalRows = Number(data.totalRows || totalRows || 0);
@@ -2014,7 +2033,7 @@
 
                 if (showProgress) {
                     const totalText = totalRows ? ` / 预计 ${Math.max(0, totalRows - 1)} 行` : '';
-                    showLoading(`正在同步飞书数据：已读取 ${rows.length}${totalText}`, `${percent}% · 第 ${batch} 批完成`);
+                    showLoading(`正在同步基础数据：已读取 ${rows.length}${totalText}`, `${percent}% · 第 ${batch} 批完成`);
                 }
 
                 if (data.done || emptyBlocks >= 2) break;
@@ -2027,6 +2046,94 @@
             return rows;
         }
 
+        async function readFeishuDynamicPages(showStatus) {
+            const rows = [];
+            let start = 2;
+            let pageSize = FEISHU_SYNC_PAGE_SIZE;
+            let batch = 0;
+            let totalRows = 0;
+
+            while (true) {
+                if (showStatus) {
+                    feishuLastSyncText = `动态同步中，已扫 ${Math.max(0, start - 2)} 行`;
+                    updateTopSyncStatus();
+                }
+
+                const data = await feishuSheetApi('getDynamicPage', { start, pageSize });
+                const pageRows = data.rows || [];
+                totalRows = Number(data.totalRows || totalRows || 0);
+                if (pageRows.length) rows.push(...pageRows);
+
+                batch += 1;
+                if (data.done) break;
+
+                start = Number(data.nextStart || (start + (data.pageSize || pageSize)));
+                pageSize = Number(data.pageSize || pageSize);
+                if (batch > 100) break;
+                await sleep(10);
+            }
+
+            return { rows, totalRows };
+        }
+
+        function applyDynamicRows(dynamicRows) {
+            if (!dynamicRows || !dynamicRows.length || !records.length) return 0;
+
+            const map = new Map();
+            records.forEach(record => {
+                const row = getRemoteRowIndex(record);
+                if (row) map.set(Number(row), record);
+            });
+
+            let changed = 0;
+            dynamicRows.forEach(row => {
+                const remoteRow = Number(row.__rowIndex || 0);
+                const record = map.get(remoteRow);
+                if (!record) return;
+
+                const nextHandler = String(row['处理人'] || '').trim();
+                const nextStatus = normalizeStatus(row['审核状态'] || row['复审结果'] || row['是否通过'] || '');
+                const nextReason = String(row['审核备注'] || row['不通过原因'] || '').trim();
+                const nextTime = String(row['审核时间'] || row['复审时间'] || '').trim();
+
+                let rowChanged = false;
+                if ((record.handlerName || '') !== nextHandler) {
+                    record.handlerName = nextHandler;
+                    rowChanged = true;
+                }
+                if ((record.reviewStatus || '') !== nextStatus) {
+                    record.reviewStatus = nextStatus;
+                    rowChanged = true;
+                }
+                if ((record.reviewReason || '') !== nextReason) {
+                    record.reviewReason = nextReason;
+                    rowChanged = true;
+                }
+                if (nextTime && (record.reviewTime || '') !== nextTime) {
+                    record.reviewTime = nextTime;
+                    rowChanged = true;
+                }
+
+                if (record.raw) {
+                    record.raw['处理人'] = nextHandler;
+                    record.raw['审核状态'] = nextStatus === 'approved' ? '通过' : nextStatus === 'rejected' ? '不通过' : '';
+                    record.raw['审核备注'] = nextReason;
+                    if (nextTime) record.raw['审核时间'] = nextTime;
+                }
+
+                if (rowChanged) changed += 1;
+            });
+
+            if (changed) {
+                filteredRecords = null;
+                lastFiltersCache = '';
+                populateFilters();
+                render(true);
+            }
+
+            return changed;
+        }
+
         async function syncFeishuData() {
             const config = saveDataSourceSettings();
             if (!config.feishuUrl) {
@@ -2034,13 +2141,17 @@
                 return;
             }
 
-            showLoading('正在准备同步飞书数据...', '0%');
+            if (reviewWriteQueue && reviewWriteQueue.size) {
+                await flushReviewWriteQueue(false);
+            }
+
+            showLoading('正在准备同步基础数据...', '0%');
             try {
                 const rows = await readFeishuAllPages(true);
                 localStorage.removeItem(STORAGE_KEY);
                 setRecords(rows, false);
-                setText('source-label', `数据源：飞书 / 全部数据 / ${rows.length} 条`);
-                feishuLastSyncText = `手动同步 ${rows.length} 条 ${formatClockTime(Date.now())}`;
+                setText('source-label', `数据源：飞书 / 基础数据 / ${rows.length} 条`);
+                feishuLastSyncText = `手动全量 ${rows.length} 条 ${formatClockTime(Date.now())}`;
                 updateTopSyncStatus();
                 showLoading(`同步完成，共 ${rows.length} 条`, '100%');
                 startFeishuSilentSync();
@@ -2056,28 +2167,31 @@
             const config = readFeishuConfig();
             const token = readFeishuToken();
             if (!config.feishuUrl || !token || (!token.access_token && !token.user_access_token)) return;
-            if (feishuSilentSyncRunning) return;
+            if (feishuSilentSyncRunning || reviewWriteRunning) return;
 
             if (reviewWriteQueue && reviewWriteQueue.size) {
                 await flushReviewWriteQueue(false);
             }
             if (reviewWriteRunning) return;
 
+            if (!records.length) {
+                feishuLastSyncText = '未加载基础数据，跳过动态同步';
+                feishuNextSilentSyncAt = Date.now() + FEISHU_SILENT_SYNC_INTERVAL;
+                updateTopSyncStatus();
+                return;
+            }
+
             feishuSilentSyncRunning = true;
-            feishuLastSyncText = '后台同步中';
+            feishuLastSyncText = '动态同步中';
             updateTopSyncStatus();
+
             try {
-                const rows = await readFeishuAllPages(false);
-                if (rows.length) {
-                    setRecords(rows, false);
-                    setText('source-label', `数据源：飞书 / 后台已同步 / ${rows.length} 条`);
-                    feishuLastSyncText = `后台同步 ${rows.length} 条 ${formatClockTime(Date.now())}`;
-                } else {
-                    feishuLastSyncText = `后台同步完成 ${formatClockTime(Date.now())}`;
-                }
+                const result = await readFeishuDynamicPages(true);
+                const changed = applyDynamicRows(result.rows);
+                feishuLastSyncText = `动态同步 ${result.rows.length} 行 / 变更 ${changed} 条 ${formatClockTime(Date.now())}`;
             } catch (error) {
-                feishuLastSyncText = `后台同步失败 ${formatClockTime(Date.now())}`;
-                console.warn('后台静默同步失败', error);
+                feishuLastSyncText = `动态同步失败 ${formatClockTime(Date.now())}`;
+                console.warn('后台动态同步失败', error);
             } finally {
                 feishuSilentSyncRunning = false;
                 feishuNextSilentSyncAt = Date.now() + FEISHU_SILENT_SYNC_INTERVAL;

@@ -1,1 +1,3 @@
-name = "star-risk-review-v3-cycle-writeback"\ncompatibility_date = "2024-01-01"\npages_build_output_dir = "public"\n
+name = "star-risk-review-v3-stable-dynamic-sync"
+compatibility_date = "2024-01-01"
+pages_build_output_dir = "public"
