@@ -48,14 +48,33 @@ export async function onRequestPost({ request }) {
       const { headers } = await readHeaders(accessToken, meta.spreadsheetToken, sheetId);
       await ensureHeaderRow(accessToken, meta.spreadsheetToken, sheetId, headers, ["处理人", "审核状态", "审核备注", "审核时间"]);
 
-      const status = normalizeReviewStatus(record?.reviewStatus);
-      const cells = {};
-      cells[ensureHeader(headers, "处理人")] = config.handlerName || record?.handlerName || record?.raw?.["处理人"] || "";
-      cells[ensureHeader(headers, "审核状态")] = status;
-      cells[ensureHeader(headers, "审核备注")] = record?.reviewReason || "";
-      cells[ensureHeader(headers, "审核时间")] = record?.reviewTime || "";
-      await updateCells(accessToken, meta.spreadsheetToken, sheetId, rowIndex, cells);
+      const valueRanges = buildReviewValueRanges(sheetId, headers, record, config);
+      await batchUpdateValues(accessToken, meta.spreadsheetToken, valueRanges);
       return json({ ok:true, rowIndex });
+    }
+
+    if (action === "batchUpdateReviews") {
+      const records = Array.isArray(body.records) ? body.records : [];
+      if (!records.length) return json({ ok:true, count:0 });
+
+      const { headers } = await readHeaders(accessToken, meta.spreadsheetToken, sheetId);
+      await ensureHeaderRow(accessToken, meta.spreadsheetToken, sheetId, headers, ["处理人", "审核状态", "审核备注", "审核时间"]);
+
+      const valueRanges = [];
+      const rowSet = new Set();
+
+      for (const item of records) {
+        const rowIndex = getRecordRowIndex(item);
+        if (!rowIndex || rowSet.has(rowIndex)) continue;
+        rowSet.add(rowIndex);
+        valueRanges.push(...buildReviewValueRanges(sheetId, headers, item, config));
+      }
+
+      if (valueRanges.length) {
+        await batchUpdateValues(accessToken, meta.spreadsheetToken, valueRanges);
+      }
+
+      return json({ ok:true, count:rowSet.size });
     }
 
     return json({ ok:false, message:"未知 action" }, 400);
@@ -402,6 +421,30 @@ function normalizeReviewStatus(status){
   if (/不通过|未通过|拒绝|驳回|reject|fail/i.test(text)) return "不通过";
   if (/通过|approved|approve|pass|correct/i.test(text)) return "通过";
   return text || "待审核";
+}
+
+function buildReviewValueRanges(sheetId, headers, record, config){
+  const rowIndex = getRecordRowIndex(record);
+  if (!rowIndex) return [];
+
+  const status = normalizeReviewStatus(record?.reviewStatus);
+  const handler = config?.handlerName || record?.handlerName || record?.raw?.["处理人"] || "";
+  const reason = record?.reviewReason || "";
+  const time = record?.reviewTime || "";
+
+  const cols = {
+    handler: ensureHeader(headers, "处理人"),
+    status: ensureHeader(headers, "审核状态"),
+    reason: ensureHeader(headers, "审核备注"),
+    time: ensureHeader(headers, "审核时间")
+  };
+
+  return [
+    { range:`${sheetId}!${colName(cols.handler)}${rowIndex}:${colName(cols.handler)}${rowIndex}`, values:[[handler]] },
+    { range:`${sheetId}!${colName(cols.status)}${rowIndex}:${colName(cols.status)}${rowIndex}`, values:[[status]] },
+    { range:`${sheetId}!${colName(cols.reason)}${rowIndex}:${colName(cols.reason)}${rowIndex}`, values:[[reason]] },
+    { range:`${sheetId}!${colName(cols.time)}${rowIndex}:${colName(cols.time)}${rowIndex}`, values:[[time]] }
+  ];
 }
 
 function getRecordRowIndex(record){
