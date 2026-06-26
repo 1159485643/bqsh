@@ -28,7 +28,6 @@ h1{margin:0;font-size:20px;line-height:1.2}
 }
 .btn:hover,.file-label:hover{border-color:var(--blue);background:#202b3a}
 .btn.primary{background:#265fb9;border-color:#3b82f6;color:white}
-.btn.primary:hover{background:#3070d6}
 .btn.ok{border-color:#43c67a;color:#73e49d}
 .btn.bad{border-color:#ff6678;color:#ff6678}
 .control{
@@ -79,9 +78,9 @@ h1{margin:0;font-size:20px;line-height:1.2}
 .empty{padding:50px;text-align:center;color:var(--muted)}
 .modal{position:fixed;inset:0;background:rgba(15,23,42,.72);display:none;place-items:center;z-index:50;padding:20px}
 .modal.show{display:grid}
-.modal-card{width:min(640px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.36)}
+.modal-card{width:min(660px,94vw);background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 24px 80px rgba(0,0,0,.36)}
 .modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--panel2)}
-.modal-body{display:grid;gap:10px;padding:16px}
+.modal-body{display:grid;gap:12px;padding:16px}
 .modal-body label{display:grid;gap:6px;color:#b5c2d5}
 .hint{font-size:12px;color:var(--muted);line-height:1.55}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d2430;border:1px solid var(--blue);padding:10px 18px;border-radius:6px;display:none;z-index:99}
@@ -117,9 +116,9 @@ h1{margin:0;font-size:20px;line-height:1.2}
     <div class="login-left">
       <span id="loginDot" class="dot"></span>
       <span id="loginText">未授权</span>
-      <span class="badge" id="appText">App：读取中</span>
+      <span class="badge" id="appText">App：未填写</span>
     </div>
-    <div class="hint">点击“飞书授权登录”时填写 App ID / App Secret；数据源设置只放表格和处理字段。</div>
+    <div class="hint">点击“飞书授权登录”会打开页面内窗口，填写 App ID / App Secret，并保存到本机浏览器。</div>
   </section>
 
   <section class="filters">
@@ -157,6 +156,31 @@ h1{margin:0;font-size:20px;line-height:1.2}
   <div id="list" class="list"><div class="empty">请先飞书授权登录，然后同步数据源。</div></div>
 </main>
 
+<div id="authModal" class="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <strong>飞书授权登录</strong>
+      <button class="btn" id="closeAuth">关闭</button>
+    </div>
+    <div class="modal-body">
+      <label>App ID
+        <input id="authAppId" class="control" placeholder="cli_xxx">
+      </label>
+      <label>App Secret
+        <input id="authAppSecret" class="control" type="password" placeholder="飞书应用 App Secret">
+      </label>
+      <label>授权范围 Scope（可不填）
+        <input id="authScope" class="control" placeholder="可选">
+      </label>
+      <div class="hint">回调地址填当前页面地址：<b id="callbackText"></b></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn" id="saveAuth">只保存</button>
+        <button class="btn primary" id="startAuth">保存并授权</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="settingsModal" class="modal">
   <div class="modal-card">
     <div class="modal-head">
@@ -171,7 +195,9 @@ h1{margin:0;font-size:20px;line-height:1.2}
       <label>审核备注列名<input id="reasonField" class="control" value="审核备注"></label>
       <label>审核时间列名<input id="timeField" class="control" value="审核时间"></label>
       <label>读取最大行数<input id="maxRows" class="control" value="5000"></label>
-      <button class="btn primary" id="saveSettings">保存设置</button>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button class="btn primary" id="saveSettings">保存设置</button>
+      </div>
     </div>
   </div>
 </div>
@@ -179,13 +205,13 @@ h1{margin:0;font-size:20px;line-height:1.2}
 <div id="toast" class="toast"></div>
 
 <script>
-const $ = id => document.getElementById(id);
 const cfgKey = "star-risk-review-v3-oauth-config";
 const tokenKey = "star-risk-review-v3-oauth-token";
+const $ = id => document.getElementById(id);
+
 let allRecords = [];
 let viewRecords = [];
 let currentPage = 0;
-let appInfo = null;
 
 const fields = {
   title:["商品标题","标题","spu_title","title"],
@@ -208,44 +234,73 @@ const fields = {
   applyType:["提报类型","apply_type"]
 };
 
-function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),1800); }
+function toast(msg){
+  const t=$("toast");
+  t.textContent=msg;
+  t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),1800);
+}
 function norm(v){ return String(v ?? "").trim(); }
-function getBy(row, arr){ for(const k of arr){ if(row[k] !== undefined && row[k] !== null) return norm(row[k]); } return ""; }
-function splitUrls(v){ return norm(v).split(/[\n\r,，;；\s]+/).filter(x=>/^https?:\/\//.test(x)); }
-function nowText(){ return new Date().toLocaleString("zh-CN",{hour12:false}); }
-function redirectUri(){ return location.origin + location.pathname; }
-
-function loadConfig(){
-  try{
-    const c=JSON.parse(localStorage.getItem(cfgKey)||"{}");
-    $("handlerName").value=c.handlerName||"";
-    $("feishuUrl").value=c.feishuUrl||"";
-    $("handlerField").value=c.handlerField||"处理人";
-    $("statusField").value=c.statusField||"审核状态";
-    $("reasonField").value=c.reasonField||"审核备注";
-    $("timeField").value=c.timeField||"审核时间";
-    $("claimCount").value=c.claimCount||20;
-    $("maxRows").value=c.maxRows||5000;
-  }catch(e){}
-}
-function saveConfig(){
-  const c={
-    appId:(JSON.parse(localStorage.getItem(cfgKey)||"{}").appId||""),
-    appSecret:(JSON.parse(localStorage.getItem(cfgKey)||"{}").appSecret||""),
-    handlerName:$("handlerName").value,
-    feishuUrl:$("feishuUrl").value,
-    handlerField:$("handlerField").value||"处理人",
-    statusField:$("statusField").value||"审核状态",
-    reasonField:$("reasonField").value||"审核备注",
-    timeField:$("timeField").value||"审核时间",
-    claimCount:$("claimCount").value||20,
-    maxRows:$("maxRows").value||5000
-  };
-  localStorage.setItem(cfgKey,JSON.stringify(c));
-  toast("设置已保存");
-}
 function config(){ return JSON.parse(localStorage.getItem(cfgKey)||"{}"); }
 function token(){ return JSON.parse(localStorage.getItem(tokenKey)||"null"); }
+function redirectUri(){ return location.origin + location.pathname; }
+function nowText(){ return new Date().toLocaleString("zh-CN",{hour12:false}); }
+function splitUrls(v){ return norm(v).split(/[\n\r,，;；\s]+/).filter(x=>/^https?:\/\//.test(x)); }
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+function getBy(row, arr){
+  for(const k of arr){
+    if(row[k] !== undefined && row[k] !== null) return norm(row[k]);
+  }
+  return "";
+}
+
+function saveConfigPatch(patch){
+  const next = { ...config(), ...patch };
+  localStorage.setItem(cfgKey, JSON.stringify(next));
+  return next;
+}
+function loadConfigToUI(){
+  const c=config();
+  $("claimCount").value=c.claimCount||20;
+  $("authAppId").value=c.appId||"";
+  $("authAppSecret").value=c.appSecret||"";
+  $("authScope").value=c.scope||"";
+  $("feishuUrl").value=c.feishuUrl||"";
+  $("handlerName").value=c.handlerName||"";
+  $("handlerField").value=c.handlerField||"处理人";
+  $("statusField").value=c.statusField||"审核状态";
+  $("reasonField").value=c.reasonField||"审核备注";
+  $("timeField").value=c.timeField||"审核时间";
+  $("maxRows").value=c.maxRows||5000;
+  $("callbackText").textContent=redirectUri();
+}
+function saveAuthConfig(){
+  const c = saveConfigPatch({
+    appId:norm($("authAppId").value),
+    appSecret:norm($("authAppSecret").value),
+    scope:norm($("authScope").value)
+  });
+  updateLoginUI();
+  toast("授权信息已保存");
+  return c;
+}
+function saveSettingsConfig(){
+  const c = saveConfigPatch({
+    feishuUrl:norm($("feishuUrl").value),
+    handlerName:norm($("handlerName").value),
+    handlerField:norm($("handlerField").value)||"处理人",
+    statusField:norm($("statusField").value)||"审核状态",
+    reasonField:norm($("reasonField").value)||"审核备注",
+    timeField:norm($("timeField").value)||"审核时间",
+    maxRows:norm($("maxRows").value)||"5000",
+    claimCount:norm($("claimCount").value)||"20"
+  });
+  toast("数据源设置已保存");
+  return c;
+}
+function saveClaimCount(){
+  saveConfigPatch({ claimCount:norm($("claimCount").value)||"20" });
+}
 function saveToken(t){
   if(!t) return;
   const expiresIn = Number(t.expires_in || t.expire || 7200);
@@ -253,37 +308,48 @@ function saveToken(t){
   localStorage.setItem(tokenKey, JSON.stringify(t));
   updateLoginUI();
 }
-function clearToken(){ localStorage.removeItem(tokenKey); updateLoginUI(); }
+function clearToken(){
+  localStorage.removeItem(tokenKey);
+  updateLoginUI();
+}
 
 async function oauthApi(action,payload={}){
-  const res=await fetch("/api/feishu-oauth",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,...payload})});
+  const res=await fetch("/api/feishu-oauth",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action,...payload})
+  });
   const data=await res.json().catch(()=>({ok:false,message:"接口返回不是 JSON"}));
   if(!res.ok || data.ok===false) throw new Error(data.message || data.msg || `请求失败 ${res.status}`);
   return data;
 }
-async function loadAppInfo(){
-  const c=config();
-  appInfo = { appId:c.appId || "", scope:c.scope || "" };
-  $("appText").textContent = appInfo.appId ? `App：${appInfo.appId}` : "App：未填写";
+function openAuthWindow(){
+  loadConfigToUI();
+  $("authModal").classList.add("show");
 }
-async function startLogin(){
-  const old = config();
-  const appId = prompt("请输入飞书 App ID", old.appId || "");
-  if(!appId) return;
-  const appSecret = prompt("请输入飞书 App Secret", old.appSecret || "");
-  if(!appSecret) return;
-
-  const next = { ...old, appId, appSecret };
-  localStorage.setItem(cfgKey, JSON.stringify(next));
-  await loadAppInfo();
-
+function closeAuthWindow(){
+  $("authModal").classList.remove("show");
+}
+function openSettingsWindow(){
+  loadConfigToUI();
+  $("settingsModal").classList.add("show");
+}
+function closeSettingsWindow(){
+  $("settingsModal").classList.remove("show");
+}
+function startAuth(){
+  const c=saveAuthConfig();
+  if(!c.appId || !c.appSecret){
+    alert("请填写 App ID 和 App Secret");
+    return;
+  }
   const state = Math.random().toString(36).slice(2) + Date.now();
   sessionStorage.setItem("feishu_oauth_state", state);
   const u = new URL("https://open.feishu.cn/open-apis/authen/v1/authorize");
-  u.searchParams.set("app_id", appId);
+  u.searchParams.set("app_id", c.appId);
   u.searchParams.set("redirect_uri", redirectUri());
   u.searchParams.set("state", state);
-  if(appInfo && appInfo.scope) u.searchParams.set("scope", appInfo.scope);
+  if(c.scope) u.searchParams.set("scope", c.scope);
   location.href = u.toString();
 }
 async function handleOAuthCallback(){
@@ -320,10 +386,9 @@ async function handleOAuthCallback(){
 }
 async function getAccessToken(){
   let t=token();
-  if(!t?.access_token && !t?.user_access_token) {
+  if(!t?.access_token && !t?.user_access_token){
     throw new Error("未飞书授权，请先点击飞书授权登录");
   }
-
   const access = t.user_access_token || t.access_token;
   if(t.expires_at && Date.now() < t.expires_at) return access;
   if(!t.refresh_token) return access;
@@ -339,25 +404,38 @@ async function getAccessToken(){
   return t.user_access_token || t.access_token;
 }
 function updateLoginUI(){
+  const c=config();
   const t=token();
   const logged=!!(t?.access_token || t?.user_access_token);
   $("loginDot").classList.toggle("on", logged);
   $("loginText").textContent = logged ? "已授权飞书" : "未授权";
   $("sourceLabel").textContent = logged ? "飞书授权模式：已登录" : "飞书授权模式：未登录";
+  $("appText").textContent = c.appId ? `App：${c.appId}` : "App：未填写";
 }
 
 function mapRecord(row, idx){
   const c=config();
   const status = norm(row[c.statusField] || row["是否通过"] || row["复审结果"] || row["review_status"]);
   return {
-    _raw: row, _rowIndex: row.__rowIndex ?? idx+2, _version: JSON.stringify(row),
-    title:getBy(row,fields.title), spu:getBy(row,fields.spu), brand:getBy(row,fields.brand),
-    brandLevel:getBy(row,fields.brandLevel), star:getBy(row,fields.star),
-    cat1:getBy(row,fields.cat1), cat2:getBy(row,fields.cat2), cat3:getBy(row,fields.cat3),
-    mgmt1:getBy(row,fields.mgmt1), mgmt2:getBy(row,fields.mgmt2), mgmt3:getBy(row,fields.mgmt3),
-    ai:getBy(row,fields.ai), score:getBy(row,fields.score),
-    image:splitUrls(getBy(row,fields.image))[0] || "", spec:splitUrls(getBy(row,fields.spec))[0] || "",
-    community:getBy(row,fields.community), external:getBy(row,fields.external),
+    _raw: row,
+    _rowIndex: row.__rowIndex ?? idx+2,
+    title:getBy(row,fields.title),
+    spu:getBy(row,fields.spu),
+    brand:getBy(row,fields.brand),
+    brandLevel:getBy(row,fields.brandLevel),
+    star:getBy(row,fields.star),
+    cat1:getBy(row,fields.cat1),
+    cat2:getBy(row,fields.cat2),
+    cat3:getBy(row,fields.cat3),
+    mgmt1:getBy(row,fields.mgmt1),
+    mgmt2:getBy(row,fields.mgmt2),
+    mgmt3:getBy(row,fields.mgmt3),
+    ai:getBy(row,fields.ai),
+    score:getBy(row,fields.score),
+    image:splitUrls(getBy(row,fields.image))[0] || "",
+    spec:splitUrls(getBy(row,fields.spec))[0] || "",
+    community:getBy(row,fields.community),
+    external:getBy(row,fields.external),
     applyType:getBy(row,fields.applyType),
     handler:norm(row[c.handlerField]),
     status: status || "待审核",
@@ -366,15 +444,26 @@ function mapRecord(row, idx){
   };
 }
 function fillSelect(id, values){
-  const el=$(id), old=el.value; el.innerHTML='<option value="">全部</option>';
-  [...new Set(values.filter(Boolean))].sort().forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; el.appendChild(o); });
+  const el=$(id);
+  const old=el.value;
+  el.innerHTML='<option value="">全部</option>';
+  [...new Set(values.filter(Boolean))].sort().forEach(v=>{
+    const o=document.createElement("option");
+    o.value=v;
+    o.textContent=v;
+    el.appendChild(o);
+  });
   el.value=old;
 }
 function refreshFilters(){
-  fillSelect("fCat1",allRecords.map(x=>x.cat1)); fillSelect("fCat2",allRecords.map(x=>x.cat2));
-  fillSelect("fCat3",allRecords.map(x=>x.cat3)); fillSelect("fMgmt1",allRecords.map(x=>x.mgmt1));
-  fillSelect("fMgmt2",allRecords.map(x=>x.mgmt2)); fillSelect("fMgmt3",allRecords.map(x=>x.mgmt3));
-  fillSelect("fBrandLevel",allRecords.map(x=>x.brandLevel)); fillSelect("fBrand",allRecords.map(x=>x.brand));
+  fillSelect("fCat1",allRecords.map(x=>x.cat1));
+  fillSelect("fCat2",allRecords.map(x=>x.cat2));
+  fillSelect("fCat3",allRecords.map(x=>x.cat3));
+  fillSelect("fMgmt1",allRecords.map(x=>x.mgmt1));
+  fillSelect("fMgmt2",allRecords.map(x=>x.mgmt2));
+  fillSelect("fMgmt3",allRecords.map(x=>x.mgmt3));
+  fillSelect("fBrandLevel",allRecords.map(x=>x.brandLevel));
+  fillSelect("fBrand",allRecords.map(x=>x.brand));
 }
 function applyFilters(){
   const q=norm($("fQuery").value).toLowerCase();
@@ -395,22 +484,38 @@ function applyFilters(){
   render();
 }
 function updateMetrics(){
-  const total=viewRecords.length, pass=viewRecords.filter(x=>x.status==="通过").length, rej=viewRecords.filter(x=>x.status==="不通过").length;
-  const pend=total-pass-rej, prog=total?((pass+rej)/total*100):0;
-  $("mTotal").textContent=total; $("mPass").textContent=pass; $("mReject").textContent=rej; $("mPending").textContent=pend; $("mProgress").textContent=prog.toFixed(1)+"%";
+  const total=viewRecords.length;
+  const pass=viewRecords.filter(x=>x.status==="通过").length;
+  const rej=viewRecords.filter(x=>x.status==="不通过").length;
+  const pend=total-pass-rej;
+  const prog=total?((pass+rej)/total*100):0;
+  $("mTotal").textContent=total;
+  $("mPass").textContent=pass;
+  $("mReject").textContent=rej;
+  $("mPending").textContent=pend;
+  $("mProgress").textContent=prog.toFixed(1)+"%";
 }
-function statusBadge(s){ if(s==="通过") return "ok"; if(s==="不通过") return "no"; return "wait"; }
+function statusBadge(s){
+  if(s==="通过") return "ok";
+  if(s==="不通过") return "no";
+  return "wait";
+}
 function render(){
   updateMetrics();
   const pageSize=Number($("pageSize").value)||10;
-  const max=Math.max(0,Math.ceil(viewRecords.length/pageSize)-1); currentPage=Math.min(currentPage,max);
+  const max=Math.max(0,Math.ceil(viewRecords.length/pageSize)-1);
+  currentPage=Math.min(currentPage,max);
   const rows=viewRecords.slice(currentPage*pageSize,currentPage*pageSize+pageSize);
   $("pageInfo").textContent=`${viewRecords.length} 条`;
   const el=$("list");
-  if(!rows.length){ el.innerHTML='<div class="empty">暂无数据</div>'; return; }
+  if(!rows.length){
+    el.innerHTML='<div class="empty">暂无数据</div>';
+    return;
+  }
   el.innerHTML="";
   rows.forEach((r)=>{
-    const div=document.createElement("div"); div.className="card";
+    const div=document.createElement("div");
+    div.className="card";
     const idx=allRecords.indexOf(r);
     div.innerHTML=`
       <div class="card-head">
@@ -429,16 +534,14 @@ function render(){
           <div class="info-row"><b>链接</b><span>${r.community?`<a class="link" target="_blank" href="${r.community}">社区链接</a>`:""} ${r.external?`<a class="link" target="_blank" href="${r.external}">站外链接</a>`:""}</span></div>
         </div>
         <div class="row-actions">
-          <button class="btn" onclick="claimOne(${idx})">领取</button>
-          <button class="btn ok" onclick="markOne(${idx},'通过')">审核通过</button>
-          <button class="btn bad" onclick="markOne(${idx},'不通过')">审核不通过</button>
+          <button class="btn" data-action="claim" data-idx="${idx}">领取</button>
+          <button class="btn ok" data-action="pass" data-idx="${idx}">审核通过</button>
+          <button class="btn bad" data-action="reject" data-idx="${idx}">审核不通过</button>
         </div>
       </div>`;
     el.appendChild(div);
   });
 }
-function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
-
 async function sheetApi(action,payload={}){
   const accessToken = await getAccessToken();
   const c=config();
@@ -452,7 +555,7 @@ async function sheetApi(action,payload={}){
   return data;
 }
 async function syncData(){
-  saveConfig();
+  saveSettingsConfig();
   try{
     toast("同步中...");
     const data=await sheetApi("get");
@@ -461,50 +564,117 @@ async function syncData(){
     if(c.handlerName){
       allRecords=allRecords.filter(r=>!r.handler || r.handler.split(/[，,、\n\r\s]+/).includes(c.handlerName));
     }
-    currentPage=0; refreshFilters(); applyFilters(); toast("同步完成");
-  }catch(e){ alert("同步失败：\n"+e.message); }
+    currentPage=0;
+    refreshFilters();
+    applyFilters();
+    toast("同步完成");
+  }catch(e){
+    alert("同步失败：\n"+e.message);
+  }
 }
 async function claimOne(idx){
-  const r=allRecords[idx], c=config(); if(!c.handlerName){ alert("请先设置处理人"); return; }
-  r.handler=c.handlerName; r.status=r.status||"待审核";
-  await updateRemote(r); applyFilters();
+  const r=allRecords[idx];
+  const c=config();
+  if(!c.handlerName){
+    alert("请先设置处理人");
+    return;
+  }
+  r.handler=c.handlerName;
+  r.status=r.status||"待审核";
+  await updateRemote(r);
+  applyFilters();
 }
 async function markOne(idx,status){
-  const r=allRecords[idx], c=config(); if(!c.handlerName){ alert("请先设置处理人"); return; }
-  r.handler=r.handler||c.handlerName; r.status=status; r.reviewTime=nowText();
-  if(status==="不通过") r.reason=prompt("请输入不通过原因",r.reason||"")||r.reason||"";
-  await updateRemote(r); applyFilters();
+  const r=allRecords[idx];
+  const c=config();
+  if(!c.handlerName){
+    alert("请先设置处理人");
+    return;
+  }
+  r.handler=r.handler||c.handlerName;
+  r.status=status;
+  r.reviewTime=nowText();
+  if(status==="不通过"){
+    r.reason=prompt("请输入不通过原因",r.reason||"")||r.reason||"";
+  }
+  await updateRemote(r);
+  applyFilters();
 }
 async function updateRemote(r){
-  try{ await sheetApi("update",{record:r}); toast("已写回飞书"); }catch(e){ alert("写回失败：\n"+e.message); }
+  try{
+    await sheetApi("update",{record:r});
+    toast("已写回飞书");
+  }catch(e){
+    alert("写回失败：\n"+e.message);
+  }
 }
 async function claimBatch(){
-  saveConfig();
-  const c=config(), n=Math.max(1,Number($("claimCount").value)||20);
-  if(!c.handlerName){ alert("请先设置处理人"); return; }
-  try{ const data=await sheetApi("claim",{count:n}); toast(`领取完成：${data.count||0} 条`); await syncData(); }catch(e){ alert("领取失败：\n"+e.message); }
+  saveSettingsConfig();
+  const c=config();
+  const n=Math.max(1,Number($("claimCount").value)||20);
+  if(!c.handlerName){
+    alert("请先设置处理人");
+    return;
+  }
+  try{
+    const data=await sheetApi("claim",{count:n});
+    toast(`领取完成：${data.count||0} 条`);
+    await syncData();
+  }catch(e){
+    alert("领取失败：\n"+e.message);
+  }
 }
 function exportXls(){
   let html='<table><tr><th>SPU ID</th><th>商品标题</th><th>品牌</th><th>品牌等级</th><th>明星同款</th><th>处理人</th><th>审核状态</th><th>审核备注</th><th>审核时间</th></tr>';
-  viewRecords.forEach(r=>{ html+=`<tr><td>${r.spu}</td><td>${r.title}</td><td>${r.brand}</td><td>${r.brandLevel}</td><td>${r.star}</td><td>${r.handler}</td><td>${r.status}</td><td>${r.reason}</td><td>${r.reviewTime}</td></tr>`; });
+  viewRecords.forEach(r=>{
+    html+=`<tr><td>${escapeHtml(r.spu)}</td><td>${escapeHtml(r.title)}</td><td>${escapeHtml(r.brand)}</td><td>${escapeHtml(r.brandLevel)}</td><td>${escapeHtml(r.star)}</td><td>${escapeHtml(r.handler)}</td><td>${escapeHtml(r.status)}</td><td>${escapeHtml(r.reason)}</td><td>${escapeHtml(r.reviewTime)}</td></tr>`;
+  });
   html+='</table>';
   const blob=new Blob(["\ufeff"+html],{type:"application/vnd.ms-excel"});
-  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="复审结果.xls"; a.click(); URL.revokeObjectURL(a.href);
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download="复审结果.xls";
+  a.click();
+  URL.revokeObjectURL(a.href);
 }
 
-document.addEventListener("DOMContentLoaded",async()=>{
-  loadConfig(); updateLoginUI(); await loadAppInfo(); await handleOAuthCallback();
-  $("btnLogin").addEventListener("click", startLogin);
-  $("btnLogout").onclick=()=>{ clearToken(); toast("已退出授权"); };
-  $("btnSettings").addEventListener("click", ()=>$("settingsModal").classList.add("show"));
-  $("closeSettings").addEventListener("click", ()=>$("settingsModal").classList.remove("show"));
-  $("saveSettings").onclick=async()=>{ saveConfig(); await loadAppInfo(); $("settingsModal").classList.remove("show"); };
-  $("btnSync").onclick=syncData;
-  $("btnClaim").onclick=claimBatch;
-  $("btnExport").onclick=exportXls;
-  ["fCat1","fCat2","fCat3","fMgmt1","fMgmt2","fMgmt3","fAi","fStatus","fBrandLevel","fBrand","fQuery","pageSize"].forEach(id=>$(id).addEventListener("input",()=>{currentPage=0;applyFilters()}));
-  $("prevPage").onclick=()=>{currentPage=Math.max(0,currentPage-1);render()};
-  $("nextPage").onclick=()=>{currentPage++;render()};
+document.addEventListener("DOMContentLoaded",()=>{
+  loadConfigToUI();
+  updateLoginUI();
+  handleOAuthCallback();
+
+  $("btnLogin").addEventListener("click", openAuthWindow);
+  $("btnLogout").addEventListener("click", ()=>{ clearToken(); toast("已退出授权"); });
+  $("closeAuth").addEventListener("click", closeAuthWindow);
+  $("saveAuth").addEventListener("click", saveAuthConfig);
+  $("startAuth").addEventListener("click", startAuth);
+
+  $("btnSettings").addEventListener("click", openSettingsWindow);
+  $("closeSettings").addEventListener("click", closeSettingsWindow);
+  $("saveSettings").addEventListener("click", ()=>{
+    saveSettingsConfig();
+    closeSettingsWindow();
+  });
+
+  $("btnSync").addEventListener("click", syncData);
+  $("btnClaim").addEventListener("click", claimBatch);
+  $("btnExport").addEventListener("click", exportXls);
+  $("claimCount").addEventListener("input", saveClaimCount);
+
+  ["fCat1","fCat2","fCat3","fMgmt1","fMgmt2","fMgmt3","fAi","fStatus","fBrandLevel","fBrand","fQuery","pageSize"].forEach(id=>{
+    $(id).addEventListener("input",()=>{currentPage=0;applyFilters();});
+  });
+  $("prevPage").addEventListener("click",()=>{currentPage=Math.max(0,currentPage-1);render();});
+  $("nextPage").addEventListener("click",()=>{currentPage++;render();});
+
+  $("list").addEventListener("click", async (ev)=>{
+    const btn = ev.target.closest("button[data-action]");
+    if(!btn) return;
+    const idx = Number(btn.dataset.idx);
+    if(btn.dataset.action==="claim") await claimOne(idx);
+    if(btn.dataset.action==="pass") await markOne(idx,"通过");
+    if(btn.dataset.action==="reject") await markOne(idx,"不通过");
+  });
 });
 </script>
 </body>

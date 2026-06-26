@@ -6,15 +6,26 @@ export async function onRequestPost({ request }) {
     if (!accessToken) return json({ ok:false, message:"缺少 user_access_token，请先飞书授权登录" }, 401);
     if (!config?.feishuUrl) return json({ ok:false, message:"缺少飞书链接" }, 400);
 
-    const meta = parseFeishuUrl(config.feishuUrl);
-    if (!meta.spreadsheetToken) return json({ ok:false, message:"无法从链接解析 spreadsheet token，请确认是飞书 Sheets 链接" }, 400);
+    let meta = parseFeishuUrl(config.feishuUrl);
+
+    if (!meta.spreadsheetToken && meta.wikiToken) {
+      meta = await resolveWikiSheet(accessToken, meta);
+    }
+
+    if (!meta.spreadsheetToken) {
+      let msg = "无法从链接解析 spreadsheet token，请确认是飞书 Sheets 链接。";
+      if (meta.baseToken) msg = "当前链接是多维表格 Bitable 链接，不是飞书 Sheets 链接；当前版本读取的是 Sheets。";
+      if (meta.docToken) msg = "当前链接是飞书文档链接，不是飞书 Sheets 链接。请打开电子表格后复制地址栏链接。";
+      if (meta.wikiToken) msg = "当前链接是知识库链接，但没有解析到电子表格对象 token。请确认知识库节点本身是电子表格。";
+      return json({ ok:false, message:msg + "\n\n支持示例：\nhttps://xxx.feishu.cn/sheets/shtxxxx?sheet=xxxx\nhttps://xxx.feishu.cn/wiki/wikxxxx（知识库里的电子表格）" }, 400);
+    }
 
     const sheetId = meta.sheetId || await getFirstSheetId(accessToken, meta.spreadsheetToken);
     if (!sheetId) return json({ ok:false, message:"无法获取工作表 sheetId" }, 400);
 
     if (action === "get") {
       const { headers, rows } = await readAll(accessToken, meta.spreadsheetToken, sheetId, Number(config.maxRows || 5000));
-      return json({ ok:true, headers, rows });
+      return json({ ok:true, headers, rows, parsed: meta });
     }
 
     if (action === "claim") {
@@ -60,7 +71,7 @@ export async function onRequestPost({ request }) {
   } catch (e) {
     return json({ ok:false, message:e.message || String(e) }, 500);
   }
-};
+}
 
 function json(data, status=200){
   return new Response(JSON.stringify(data), {
@@ -69,15 +80,129 @@ function json(data, status=200){
   });
 }
 
-function parseFeishuUrl(url){
-  const s = String(url || "");
-  const m = s.match(/\/sheets\/([A-Za-z0-9]+)/);
-  let sheetId = "";
+function cleanInput(input){
+  let s = String(input || "").trim();
+
+  // 去掉飞书复制时可能带的尖括号、引号、中文说明文字，只保留 URL 主体
+  const urlMatch = s.match(/https?:\/\/[^\s"'<>]+/);
+  if (urlMatch) s = urlMatch[0];
+
+  // 处理被 encode 到参数里的 URL
+  for (let i = 0; i < 3; i++) {
+    try {
+      const d = decodeURIComponent(s);
+      if (d === s) break;
+      s = d;
+    } catch(e) {
+      break;
+    }
+  }
+
+  return s.replace(/&amp;/g, "&");
+}
+
+function parseFeishuUrl(rawUrl){
+  const s = cleanInput(rawUrl);
+  const meta = {
+    original: String(rawUrl || ""),
+    normalized: s,
+    spreadsheetToken: "",
+    sheetId: "",
+    wikiToken: "",
+    baseToken: "",
+    docToken: ""
+  };
+
+  const searchText = s;
+
+  // 常规飞书 Sheets 链接
+  const sheetPatterns = [
+    /\/sheets\/([A-Za-z0-9]+)/i,
+    /\/sheet\/([A-Za-z0-9]+)/i,
+    /\/spreadsheets\/([A-Za-z0-9]+)/i,
+    /\/spreadsheet\/([A-Za-z0-9]+)/i
+  ];
+  for (const p of sheetPatterns) {
+    const m = searchText.match(p);
+    if (m) {
+      meta.spreadsheetToken = m[1];
+      break;
+    }
+  }
+
+  // Query 参数兜底
   try {
     const u = new URL(s);
-    sheetId = u.searchParams.get("sheet") || u.searchParams.get("sheetId") || "";
-  } catch(e){}
-  return { spreadsheetToken: m ? m[1] : "", sheetId };
+    meta.sheetId = u.searchParams.get("sheet") || u.searchParams.get("sheetId") || u.searchParams.get("gid") || "";
+    meta.spreadsheetToken = meta.spreadsheetToken ||
+      u.searchParams.get("spreadsheet_token") ||
+      u.searchParams.get("spreadsheetToken") ||
+      u.searchParams.get("sheet_token") ||
+      "";
+
+    // hash 里有时也会带 sheet
+    if (!meta.sheetId && u.hash) {
+      const hash = u.hash.replace(/^#/, "");
+      const hp = new URLSearchParams(hash.includes("?") ? hash.split("?").pop() : hash);
+      meta.sheetId = hp.get("sheet") || hp.get("sheetId") || hp.get("gid") || "";
+    }
+
+    // 有些复制链接会把真实地址放在 url/redirect/target 参数里
+    const nested = u.searchParams.get("url") || u.searchParams.get("redirect") || u.searchParams.get("target") || u.searchParams.get("link");
+    if (nested && !meta.spreadsheetToken) {
+      const nestedMeta = parseFeishuUrl(nested);
+      Object.assign(meta, {
+        spreadsheetToken: nestedMeta.spreadsheetToken,
+        sheetId: meta.sheetId || nestedMeta.sheetId,
+        wikiToken: nestedMeta.wikiToken,
+        baseToken: nestedMeta.baseToken,
+        docToken: nestedMeta.docToken
+      });
+    }
+  } catch(e) {}
+
+  // Wiki 知识库链接
+  const wikiMatch = searchText.match(/\/wiki\/([A-Za-z0-9]+)/i);
+  if (wikiMatch) meta.wikiToken = wikiMatch[1];
+
+  // 多维表格 / 文档链接，用于给更准确报错
+  const baseMatch = searchText.match(/\/base\/([A-Za-z0-9]+)/i);
+  if (baseMatch) meta.baseToken = baseMatch[1];
+
+  const docMatch = searchText.match(/\/(?:docx|docs|doc)\/([A-Za-z0-9]+)/i);
+  if (docMatch) meta.docToken = docMatch[1];
+
+  // 裸 token 兜底
+  if (!meta.spreadsheetToken) {
+    const bareSheet = searchText.match(/\b(sht[a-zA-Z0-9]{8,}|shtcn[a-zA-Z0-9]+)\b/);
+    if (bareSheet) meta.spreadsheetToken = bareSheet[1];
+  }
+  if (!meta.wikiToken) {
+    const bareWiki = searchText.match(/\b(wik[a-zA-Z0-9]{8,}|wikcn[a-zA-Z0-9]+)\b/);
+    if (bareWiki) meta.wikiToken = bareWiki[1];
+  }
+
+  return meta;
+}
+
+async function resolveWikiSheet(accessToken, meta){
+  const res = await fetch(`https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(meta.wikiToken)}`, {
+    headers:{ Authorization:`Bearer ${accessToken}` }
+  });
+  const data = await res.json();
+  if (data.code !== 0) {
+    throw new Error(`解析知识库节点失败：${data.msg || data.code}`);
+  }
+
+  const node = data.data?.node || {};
+  meta.wikiObjType = node.obj_type || "";
+  meta.wikiObjToken = node.obj_token || "";
+
+  if (node.obj_type === "sheet" && node.obj_token) {
+    meta.spreadsheetToken = node.obj_token;
+  }
+
+  return meta;
 }
 
 async function getFirstSheetId(accessToken, spreadsheetToken){
