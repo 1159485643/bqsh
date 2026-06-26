@@ -114,6 +114,21 @@
             background: #202b3a;
             color: var(--text);
         }
+        .claim-progress {
+            min-width: 120px;
+            color: var(--muted);
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .claim-progress.active {
+            color: #78b7ff;
+        }
+        .claim-progress.done {
+            color: #73e49d;
+        }
+        .claim-progress.error {
+            color: var(--red);
+        }
         .btn:hover {
             border-color: var(--blue);
             background: #202b3a;
@@ -1345,6 +1360,7 @@
             <button class="btn" id="btn-sync-feishu" type="button">同步数据源</button>
             <input class="control" id="claim-count" type="number" min="1" max="500" value="20" style="width:80px">
             <button class="btn" id="btn-claim-task" type="button">领取任务</button>
+            <span class="claim-progress" id="claim-progress"></span>
             <label class="btn" for="file-input">导入文件</label>
             <input id="file-input" type="file" accept=".ndjson,.json,.txt,.csv,.xls" hidden>
             <button class="btn" id="btn-export-xls" type="button">导出 Excel (.xls)</button>
@@ -1822,6 +1838,72 @@
             return new Promise(resolve => setTimeout(resolve, ms));
         }
 
+        const FEISHU_SYNC_PAGE_SIZE = 4000;
+        const FEISHU_SILENT_SYNC_INTERVAL = 180000;
+        let feishuSilentSyncTimer = null;
+        let feishuSilentSyncRunning = false;
+
+        function setClaimProgress(text, state) {
+            const el = document.getElementById('claim-progress');
+            if (!el) return;
+            el.textContent = text || '';
+            el.classList.remove('active', 'done', 'error');
+            if (state) el.classList.add(state);
+        }
+
+        function calcSyncPercent(start, scanned, totalRows, batch) {
+            const total = Number(totalRows || 0);
+            if (total > 1) {
+                const doneRows = Math.max(0, Number(start || 2) - 2 + Number(scanned || 0));
+                return Math.max(1, Math.min(99, Math.floor(doneRows / Math.max(1, total - 1) * 100)));
+            }
+            return Math.min(95, 8 + batch * 12);
+        }
+
+        async function readFeishuAllPages(showProgress) {
+            const rows = [];
+            let start = 2;
+            let pageSize = FEISHU_SYNC_PAGE_SIZE;
+            let batch = 0;
+            let emptyBlocks = 0;
+            let totalRows = 0;
+
+            while (true) {
+                if (showProgress) {
+                    const p = calcSyncPercent(start, 0, totalRows, batch);
+                    showLoading(`正在同步飞书数据：第 ${batch + 1} 批`, `${p}% · 已读取 ${rows.length} 行 · 每批约 ${pageSize} 行`);
+                }
+
+                const data = await feishuSheetApi('getPage', { start, pageSize });
+                const pageRows = data.rows || [];
+                totalRows = Number(data.totalRows || totalRows || 0);
+
+                if (pageRows.length) {
+                    rows.push(...pageRows);
+                    emptyBlocks = 0;
+                } else {
+                    emptyBlocks++;
+                }
+
+                batch += 1;
+                const scanned = Number(data.scanned || pageRows.length || 0);
+                const percent = data.done ? 100 : calcSyncPercent(start, scanned, totalRows, batch);
+
+                if (showProgress) {
+                    const totalText = totalRows ? ` / 预计 ${Math.max(0, totalRows - 1)} 行` : '';
+                    showLoading(`正在同步飞书数据：已读取 ${rows.length}${totalText}`, `${percent}% · 第 ${batch} 批完成`);
+                }
+
+                if (data.done || emptyBlocks >= 2) break;
+
+                start = Number(data.nextStart || (start + (data.pageSize || pageSize)));
+                pageSize = Number(data.pageSize || pageSize);
+                await sleep(10);
+            }
+
+            return rows;
+        }
+
         async function syncFeishuData() {
             const config = saveDataSourceSettings();
             if (!config.feishuUrl) {
@@ -1829,48 +1911,45 @@
                 return;
             }
 
-            const rows = [];
-            let start = 2;
-            let pageSize = 500;
-            let batch = 0;
-            let emptyBlocks = 0;
-
             showLoading('正在准备同步飞书数据...', '0%');
             try {
-                while (true) {
-                    const visualPercent = Math.min(95, 5 + batch * 6);
-                    showLoading(`正在同步飞书数据：第 ${batch + 1} 批`, `${visualPercent}% · 已读取 ${rows.length} 行`);
-
-                    const data = await feishuSheetApi('getPage', { start, pageSize });
-                    const pageRows = data.rows || [];
-                    if (pageRows.length) {
-                        rows.push(...pageRows);
-                        emptyBlocks = 0;
-                    } else {
-                        emptyBlocks++;
-                    }
-
-                    batch += 1;
-                    const nextPercent = data.done ? 100 : Math.min(95, 5 + batch * 6);
-                    showLoading(`正在同步飞书数据：已读取 ${rows.length} 行`, `${nextPercent}% · 第 ${batch} 批完成`);
-
-                    if (data.done || emptyBlocks >= 2) break;
-
-                    start = Number(data.nextStart || (start + (data.pageSize || pageSize)));
-                    pageSize = Number(data.pageSize || pageSize);
-                    await sleep(20);
-                }
-
+                const rows = await readFeishuAllPages(true);
                 localStorage.removeItem(STORAGE_KEY);
                 setRecords(rows, false);
                 setText('source-label', `数据源：飞书 / 全部数据 / ${rows.length} 条`);
                 showLoading(`同步完成，共 ${rows.length} 条`, '100%');
-                await sleep(350);
+                startFeishuSilentSync();
+                await sleep(250);
             } catch (error) {
                 alert('同步失败：\n' + error.message);
             } finally {
                 hideLoading();
             }
+        }
+
+        async function silentSyncFeishuData() {
+            const config = readFeishuConfig();
+            const token = readFeishuToken();
+            if (!config.feishuUrl || !token || (!token.access_token && !token.user_access_token)) return;
+            if (feishuSilentSyncRunning) return;
+
+            feishuSilentSyncRunning = true;
+            try {
+                const rows = await readFeishuAllPages(false);
+                if (rows.length) {
+                    setRecords(rows, false);
+                    setText('source-label', `数据源：飞书 / 后台已同步 / ${rows.length} 条`);
+                }
+            } catch (error) {
+                console.warn('后台静默同步失败', error);
+            } finally {
+                feishuSilentSyncRunning = false;
+            }
+        }
+
+        function startFeishuSilentSync() {
+            if (feishuSilentSyncTimer) clearInterval(feishuSilentSyncTimer);
+            feishuSilentSyncTimer = setInterval(silentSyncFeishuData, FEISHU_SILENT_SYNC_INTERVAL);
         }
 
         function getRemoteRowIndex(record) {
@@ -1896,11 +1975,12 @@
             const count = Math.max(1, Number(countEl ? countEl.value : config.claimCount || 20) || 20);
             const btn = document.getElementById('btn-claim-task');
             if (btn) btn.disabled = true;
-            showLoading(`正在批量领取 ${count} 条任务...`, '35%');
+
+            setClaimProgress(`领取中：校验无人认领行...`, 'active');
             try {
-                const data = await feishuSheetApi('claim', { count });
-                showLoading(`领取完成，正在更新页面...`, '90%');
+                const data = await feishuSheetApi('claim', { count, pageSize: FEISHU_SYNC_PAGE_SIZE });
                 const claimedRows = new Set((data.rows || []).map(v => Number(v)).filter(Boolean));
+
                 if (claimedRows.size) {
                     records.forEach(record => {
                         if (claimedRows.has(getRemoteRowIndex(record))) {
@@ -1913,13 +1993,16 @@
                     populateFilters();
                     render(true);
                 }
-                showLoading(`领取完成：${data.count || 0} 条`, '100%');
-                await sleep(250);
-                alert(`领取完成：${data.count || 0} 条`);
+
+                setClaimProgress(`领取完成：${data.count || 0} 条`, 'done');
+                setTimeout(() => {
+                    setClaimProgress('', '');
+                    silentSyncFeishuData();
+                }, 1800);
             } catch (error) {
+                setClaimProgress('领取失败', 'error');
                 alert('领取失败：\n' + error.message);
             } finally {
-                hideLoading();
                 if (btn) btn.disabled = false;
             }
         }
@@ -3646,6 +3729,8 @@
             if (claimCount) claimCount.value = savedFeishuConfig.claimCount || 20;
             await handleFeishuOauthCallback();
             setRecords([], false, true);
+            startFeishuSilentSync();
+            setTimeout(silentSyncFeishuData, 1200);
             hideLoading();
         }
 

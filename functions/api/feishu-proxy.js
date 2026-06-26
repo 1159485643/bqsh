@@ -20,7 +20,8 @@ export async function onRequestPost({ request }) {
       return json({ ok:false, message:msg }, 400);
     }
 
-    const sheetId = meta.sheetId || await getFirstSheetId(accessToken, meta.spreadsheetToken);
+    const sheetInfo = await getSheetInfo(accessToken, meta.spreadsheetToken, meta.sheetId);
+    const sheetId = sheetInfo.sheetId;
     if (!sheetId) return json({ ok:false, message:"无法获取工作表 sheetId" }, 400);
 
     if (action === "get") {
@@ -30,13 +31,13 @@ export async function onRequestPost({ request }) {
 
     if (action === "getPage") {
       const start = Math.max(2, Number(body.start || 2));
-      const pageSize = Math.max(50, Math.min(1000, Number(body.pageSize || 500)));
+      const pageSize = Math.max(500, Math.min(5000, Number(body.pageSize || 4000)));
       const page = await readPage(accessToken, meta.spreadsheetToken, sheetId, start, pageSize);
-      return json({ ok:true, ...page, parsed:meta });
+      return json({ ok:true, ...page, totalRows:sheetInfo.rowCount || 0, parsed:meta });
     }
 
     if (action === "claim") {
-      const result = await claimRows(accessToken, meta.spreadsheetToken, sheetId, config.handlerName || "", Number(count || 20));
+      const result = await claimRows(accessToken, meta.spreadsheetToken, sheetId, config.handlerName || "", Number(count || 20), Math.max(500, Math.min(5000, Number(body.pageSize || 4000))));
       return json({ ok:true, count:result.rows.length, rows:result.rows });
     }
 
@@ -177,6 +178,27 @@ async function resolveWikiSheet(accessToken, meta){
   return meta;
 }
 
+async function getSheetInfo(accessToken, spreadsheetToken, preferredSheetId){
+  const res = await fetch(`https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${spreadsheetToken}/sheets/query`, {
+    headers:{ Authorization:`Bearer ${accessToken}` }
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`获取工作表失败：${data.msg || data.code}`);
+
+  const sheets = data.data?.sheets || [];
+  const sheet = (preferredSheetId ? sheets.find(item =>
+    item.sheet_id === preferredSheetId || item.sheetId === preferredSheetId
+  ) : null) || sheets[0] || {};
+
+  const grid = sheet.grid_properties || sheet.gridProperties || {};
+  const rowCount = Number(grid.row_count || grid.rowCount || sheet.row_count || sheet.rowCount || 0) || 0;
+
+  return {
+    sheetId: sheet.sheet_id || sheet.sheetId || preferredSheetId || "",
+    rowCount
+  };
+}
+
 async function getFirstSheetId(accessToken, spreadsheetToken){
   const res = await fetch(`https://open.feishu.cn/open-apis/sheets/v3/spreadsheets/${spreadsheetToken}/sheets/query`, {
     headers:{ Authorization:`Bearer ${accessToken}` }
@@ -216,8 +238,8 @@ async function readRangeWithRetry(accessToken, spreadsheetToken, range, pageSize
   const res = await fetch(url, { headers:{ Authorization:`Bearer ${accessToken}` } });
   const data = await res.json();
   const msg = String(data.msg || data.message || "");
-  if (data.code !== 0 && /exceeded|10485760|too large/i.test(msg) && pageSizeRef.value > 50) {
-    pageSizeRef.value = Math.max(50, Math.floor(pageSizeRef.value / 2));
+  if (data.code !== 0 && /exceeded|10485760|too large/i.test(msg) && pageSizeRef.value > 500) {
+    pageSizeRef.value = Math.max(500, Math.floor(pageSizeRef.value / 2));
     return { retry:true };
   }
   if (data.code !== 0) throw new Error(`读取表格失败：${data.msg || data.code}`);
@@ -229,7 +251,7 @@ async function readAll(accessToken, spreadsheetToken, sheetId){
   const headers = headerResult.headers || [];
   const rows = [];
   let start = 2;
-  const pageSizeRef = { value:500 };
+  const pageSizeRef = { value:4000 };
   let emptyBlocks = 0;
 
   while (true) {
@@ -306,7 +328,7 @@ async function readPage(accessToken, spreadsheetToken, sheetId, start, pageSize)
   }
 }
 
-async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, count){
+async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, count, claimPageSize = 4000){
   if (!handlerName) throw new Error("处理人姓名不能为空");
 
   const { headers } = await readHeaders(accessToken, spreadsheetToken, sheetId);
@@ -318,7 +340,7 @@ async function claimRows(accessToken, spreadsheetToken, sheetId, handlerName, co
   const valueRanges = [];
 
   let start = 2;
-  const pageSizeRef = { value:500 };
+  const pageSizeRef = { value:claimPageSize };
   let emptyBlocks = 0;
 
   while (claimed.length < count) {
