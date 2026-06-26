@@ -1,15 +1,24 @@
-# 明星同款舆情风险复审 V3 - SaaS OAuth 最终修正版
+# 明星同款舆情风险复审 V3 - 流式同步版
 
-## 本次修复
+## 本次调整
 
-- 修复 OAuth callback 里多个 Set-Cookie 合并写入导致 session cookie 可能丢失的问题。
-- callback 写 session 后分别写入：
-  - feishu_oauth_state 清理 cookie
-  - feishu_session 登录 cookie
-- /api/feishu-login 使用 URLSearchParams 统一编码 redirect_uri / state / scope。
-- scope 保留飞书官方空格分隔格式，支持用 Cloudflare 变量 FEISHU_OAUTH_SCOPE 覆盖。
-- callback 没有 code 时给出明确提示：必须从页面点击“飞书登录”，不能直接打开 callback 地址。
-- 保留 SaaS KV 登录、多用户隔离、自动刷新 token、后台动态同步、5秒周期批量回写等稳定版能力。
+- 基础数据改为流式加载：
+  - 手动同步后首批数据到达即渲染页面。
+  - 后续批次在后台继续补全。
+  - 不再等全量数据全部读取完成后才显示。
+- 回写更及时：
+  - 审核变更后约 700ms 触发批量回写。
+  - 兜底周期 1.5 秒检查一次。
+  - 同一行连续点击只保留最后一次结果，减少请求过多。
+- 自动同步更短：
+  - 后台动态同步周期改为 60 秒。
+  - 后台只同步动态字段：处理人 / 审核状态 / 审核备注 / 审核时间。
+  - 基础字段、图片、链接不在后台重复请求。
+- 保留 SaaS KV 登录：
+  - 用户只点“飞书登录”
+  - token 存 KV
+  - 前端不保存 access_token
+- 保留原处理页面 UI、图片预览、不通过快捷原因、不通过原因不能为空校验、处理人筛选、Excel 合并按钮、领取按钮内进度。
 
 ## Cloudflare 需要保证已有
 
@@ -23,23 +32,8 @@ wrangler.toml 已包含：
 
 - FEISHU_KV = 576f4e274ed64404a9519cce09f764dc
 
-## 飞书后台重定向 URL
-
-必须存在且完全一致：
-
-https://bqsh.pages.dev/api/feishu-oauth-callback
-
 ## 部署
 
 Cloudflare Pages：
-
 - Build command 留空
 - Build output directory 填 public
-
-重新上传/部署后，清理浏览器 cookie，再从页面点击“飞书登录”。
-
-
-## 2026-06-27 修复
-
-- 修复前端 `redirectUri is not defined` 导致登录成功后 loading 卡住的问题。
-- `handleFeishuOauthCallback()` 增加异常兜底，登录状态检查失败也不会遮挡页面。

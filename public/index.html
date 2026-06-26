@@ -1844,13 +1844,14 @@
         }
 
         const FEISHU_SYNC_PAGE_SIZE = 4000;
-        const FEISHU_SILENT_SYNC_INTERVAL = 180000;
-        const FEISHU_WRITEBACK_INTERVAL = 5000;
+        const FEISHU_SILENT_SYNC_INTERVAL = 60000;
+        const FEISHU_WRITEBACK_INTERVAL = 1500;
         let feishuSilentSyncTimer = null;
         let feishuSilentSyncRunning = false;
         let feishuNextSilentSyncAt = 0;
         let feishuLastSyncText = '未同步';
         let reviewWriteTimer = null;
+        let reviewWriteDebounceTimer = null;
         let reviewWriteQueue = new Map();
         let reviewWriteRunning = false;
         let reviewLastWriteText = '无待处理';
@@ -1895,6 +1896,12 @@
         function ensureReviewWriteTimer() {
             if (reviewWriteTimer) return;
             reviewWriteTimer = setInterval(() => flushReviewWriteQueue(false), FEISHU_WRITEBACK_INTERVAL);
+        }
+
+        function scheduleReviewWriteSoon() {
+            ensureReviewWriteTimer();
+            if (reviewWriteDebounceTimer) clearTimeout(reviewWriteDebounceTimer);
+            reviewWriteDebounceTimer = setTimeout(() => flushReviewWriteQueue(false), 700);
         }
 
         async function flushReviewWriteQueue(force) {
@@ -1946,18 +1953,23 @@
             return Math.min(95, 8 + batch * 12);
         }
 
-        async function readFeishuAllPages(showProgress) {
+        async function readFeishuAllPages(showProgress, options = {}) {
             const rows = [];
             let start = 2;
             let pageSize = FEISHU_SYNC_PAGE_SIZE;
             let batch = 0;
             let emptyBlocks = 0;
             let totalRows = 0;
+            let firstPaintDone = false;
 
             while (true) {
-                if (showProgress) {
+                const useOverlay = showProgress && !(options.stream && firstPaintDone);
+                if (useOverlay) {
                     const p = calcSyncPercent(start, 0, totalRows, batch);
                     showLoading(`正在同步基础数据：第 ${batch + 1} 批`, `${p}% · 已读取 ${rows.length} 行 · 每批约 ${pageSize} 行`);
+                } else if (options.stream) {
+                    feishuLastSyncText = `基础数据流加载中，已读 ${rows.length} 行`;
+                    updateTopSyncStatus();
                 }
 
                 const data = await feishuSheetApi('getPage', { start, pageSize });
@@ -1967,6 +1979,19 @@
                 if (pageRows.length) {
                     rows.push(...pageRows);
                     emptyBlocks = 0;
+
+                    if (options.stream) {
+                        setRecords(pageRows, true);
+                        const totalText = totalRows ? ` / 预计 ${Math.max(0, totalRows - 1)} 行` : '';
+                        setText('source-label', `数据源：飞书 / 流式加载中 / 已读取 ${rows.length}${totalText} 条`);
+                        feishuLastSyncText = `流式加载 ${rows.length}${totalText} 条`;
+                        updateTopSyncStatus();
+
+                        if (!firstPaintDone) {
+                            firstPaintDone = true;
+                            hideLoading();
+                        }
+                    }
                 } else {
                     emptyBlocks++;
                 }
@@ -1975,16 +2000,20 @@
                 const scanned = Number(data.scanned || pageRows.length || 0);
                 const percent = data.done ? 100 : calcSyncPercent(start, scanned, totalRows, batch);
 
-                if (showProgress) {
+                if (useOverlay && !firstPaintDone) {
                     const totalText = totalRows ? ` / 预计 ${Math.max(0, totalRows - 1)} 行` : '';
                     showLoading(`正在同步基础数据：已读取 ${rows.length}${totalText}`, `${percent}% · 第 ${batch} 批完成`);
+                } else if (options.stream) {
+                    const totalText = totalRows ? ` / 预计 ${Math.max(0, totalRows - 1)} 行` : '';
+                    feishuLastSyncText = data.done ? `基础数据加载完成 ${rows.length} 条 ${formatClockTime(Date.now())}` : `基础数据继续加载 ${rows.length}${totalText} 条`;
+                    updateTopSyncStatus();
                 }
 
                 if (data.done || emptyBlocks >= 2) break;
 
                 start = Number(data.nextStart || (start + (data.pageSize || pageSize)));
                 pageSize = Number(data.pageSize || pageSize);
-                await sleep(10);
+                await sleep(5);
             }
 
             return rows;
@@ -2091,15 +2120,19 @@
 
             showLoading('正在准备同步基础数据...', '0%');
             try {
-                const rows = await readFeishuAllPages(true);
                 localStorage.removeItem(STORAGE_KEY);
-                setRecords(rows, false);
+                records = [];
+                recordMap.clear();
+                filteredRecords = null;
+                lastFiltersCache = '';
+                setRecords([], false, true);
+                setText('source-label', '数据源：飞书 / 正在流式加载基础数据');
+
+                const rows = await readFeishuAllPages(true, { stream: true });
                 setText('source-label', `数据源：飞书 / 基础数据 / ${rows.length} 条`);
-                feishuLastSyncText = `手动全量 ${rows.length} 条 ${formatClockTime(Date.now())}`;
+                feishuLastSyncText = `基础数据加载完成 ${rows.length} 条 ${formatClockTime(Date.now())}`;
                 updateTopSyncStatus();
-                showLoading(`同步完成，共 ${rows.length} 条`, '100%');
                 startFeishuSilentSync();
-                await sleep(250);
             } catch (error) {
                 alert('同步失败：\n' + error.message);
             } finally {
@@ -2219,7 +2252,7 @@
             reviewWriteQueue.set(String(compact.remoteRowIndex), compact);
             reviewLastWriteText = `待回写 ${reviewWriteQueue.size} 条`;
             updateTopSyncStatus();
-            ensureReviewWriteTimer();
+            scheduleReviewWriteSoon();
         }
 
         function decodeHtml(value) {
