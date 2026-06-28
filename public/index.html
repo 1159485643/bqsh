@@ -1372,6 +1372,7 @@
             }
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 </head>
 <body>
     <div id="loading-overlay" class="loading-overlay">
@@ -1399,7 +1400,7 @@
                     <button class="excel-menu-item" id="btn-export-xls" type="button">导出 Excel</button>
                 </div>
             </div>
-            <input id="file-input" type="file" accept=".ndjson,.json,.txt,.csv,.xls,.xlsx" hidden>
+            <input id="file-input" type="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.xml,.html,.htm,.ndjson,.json" hidden>
         </div>
     </header>
 
@@ -1595,11 +1596,36 @@
         'use strict';
 
         const STORAGE_KEY = 'starRiskReviewProgress:v1';
+        const DATA_SOURCE_MODE_KEY = 'starRiskReviewDataSourceMode:v1';
         let records = [];
         let filteredRecords = null;
         let activeRecordKey = '';
         let pendingRejectKey = '';
         let currentPage = 0;
+
+        function setDataSourceMode(mode) {
+            localStorage.setItem(DATA_SOURCE_MODE_KEY, mode || 'feishu');
+            updateTopSyncStatus();
+        }
+
+        function getDataSourceMode() {
+            return localStorage.getItem(DATA_SOURCE_MODE_KEY) || 'feishu';
+        }
+
+        function isLocalFileMode() {
+            return getDataSourceMode() === 'local';
+        }
+
+        function stopFeishuSilentSyncForLocalMode() {
+            if (feishuSilentSyncTimer) {
+                clearTimeout(feishuSilentSyncTimer);
+                feishuSilentSyncTimer = null;
+            }
+            feishuSilentSyncRunning = false;
+            feishuNextSilentSyncAt = 0;
+            feishuLastSyncText = '线下模式';
+            updateTopSyncStatus();
+        }
 
         let precomputedFilterOptions = null;
         let categoryLv1Set = new Set();
@@ -1785,11 +1811,17 @@ function openDataSourceSettings() {
         function updateTopSyncStatus(extra) {
             const line = document.getElementById('sync-status-line');
             if (!line) return;
+            const queueSize = reviewWriteQueue ? reviewWriteQueue.size : 0;
+            const writeText = reviewWriteRunning ? '回写中' : (queueSize ? `待回写 ${queueSize} 条` : reviewLastWriteText);
+
+            if (isLocalFileMode()) {
+                line.textContent = `线下模式：本地复审进度实时保存 / ${writeText}${extra ? ' / ' + extra : ''}`;
+                return;
+            }
+
             const now = Date.now();
             const remain = feishuNextSilentSyncAt ? Math.max(0, Math.ceil((feishuNextSilentSyncAt - now) / 1000)) : 0;
-            const queueSize = reviewWriteQueue ? reviewWriteQueue.size : 0;
             const syncText = feishuSilentSyncRunning ? '同步中' : feishuLastSyncText;
-            const writeText = reviewWriteRunning ? '回写中' : (queueSize ? `待回写 ${queueSize} 条` : reviewLastWriteText);
             const nextText = feishuNextSilentSyncAt ? (remain > 0 ? `${remain}s 后` : (feishuSilentSyncRunning ? '执行中' : '即将执行')) : '未启动';
             line.textContent = `后台动态同步：${syncText} / 周期 ${Math.round(FEISHU_SILENT_SYNC_INTERVAL / 1000)}s / 下次 ${nextText} / ${writeText}${extra ? ' / ' + extra : ''}`;
         }
@@ -2025,6 +2057,14 @@ function openDataSourceSettings() {
         }
 
         async function syncFeishuData() {
+            const existingConfig = readFeishuConfig();
+            if (isLocalFileMode() && records.length && (!existingConfig.appId || !existingConfig.appSecret || !existingConfig.feishuUrl)) {
+                showToast('线下模式下复审进度已实时保存，无需手动同步');
+                updateTopSyncStatus('无需同步');
+                return;
+            }
+
+            setDataSourceMode('feishu');
             const config = saveDataSourceSettings();
             if (!config.appId || !config.appSecret) {
                 alert('请先在数据源设置里填写 App ID 和 App Secret');
@@ -2062,6 +2102,11 @@ function openDataSourceSettings() {
         }
 
         function scheduleNextSilentSync(delay) {
+            if (isLocalFileMode()) {
+                stopFeishuSilentSyncForLocalMode();
+                return;
+            }
+
             const safeDelay = Math.max(5000, Number(delay || FEISHU_SILENT_SYNC_INTERVAL));
             if (feishuSilentSyncTimer) clearTimeout(feishuSilentSyncTimer);
             feishuNextSilentSyncAt = Date.now() + safeDelay;
@@ -2077,6 +2122,11 @@ function openDataSourceSettings() {
         }
 
         async function silentSyncFeishuData() {
+            if (isLocalFileMode()) {
+                stopFeishuSilentSyncForLocalMode();
+                return;
+            }
+
             const config = readFeishuConfig();
 
             if (!config.appId || !config.appSecret) {
@@ -2788,8 +2838,11 @@ function openDataSourceSettings() {
             if (trimmed[0] === '{') {
                 return parseNdjson(trimmed);
             }
-            if (trimmed.startsWith('<?xml') || trimmed.startsWith('<Workbook')) {
+            if (trimmed.startsWith('<?xml') || trimmed.startsWith('<Workbook') || /<Workbook[\s>]/i.test(trimmed)) {
                 return parseXmlSpreadsheet(trimmed);
+            }
+            if (/<table[\s>]/i.test(trimmed)) {
+                return parseHtmlTable(trimmed);
             }
             // Detect CSV vs TSV
             const firstLine = trimmed.split('\n')[0];
@@ -3356,6 +3409,51 @@ function openDataSourceSettings() {
             URL.revokeObjectURL(url);
         }
 
+        function sanitizeExportFileName(name) {
+            const cleaned = String(name || '').trim()
+                .replace(/[\\/:*?"<>|]/g, '_')
+                .replace(/\s+/g, ' ');
+            return cleaned || '明星同款舆情风险复审结果';
+        }
+
+        function defaultExportFileName() {
+            const pad = n => String(n).padStart(2, '0');
+            const now = new Date();
+            return `明星同款舆情风险复审结果_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}.xls`;
+        }
+
+        async function exportXlsWithCustomName() {
+            const xml = toXls(records);
+            const type = 'application/vnd.ms-excel;charset=utf-8';
+            const defaultName = defaultExportFileName();
+
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: defaultName,
+                        types: [{
+                            description: 'Excel 97-2003 工作簿',
+                            accept: { 'application/vnd.ms-excel': ['.xls'] }
+                        }]
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(new Blob([xml], { type }));
+                    await writable.close();
+                    showToast('Excel 已保存');
+                    return;
+                } catch (error) {
+                    if (error && error.name === 'AbortError') return;
+                    console.warn('系统保存窗口不可用，降级为命名下载', error);
+                }
+            }
+
+            const input = prompt('请输入导出的 Excel 文件名', defaultName);
+            if (input === null) return;
+            let filename = sanitizeExportFileName(input);
+            if (!/\.xls$/i.test(filename)) filename += '.xls';
+            download(filename, xml, type);
+        }
+
         function showToast(message) {
             let toast = document.querySelector('.toast');
             if (!toast) {
@@ -3648,7 +3746,8 @@ function openDataSourceSettings() {
                 if (target.id === 'btn-export-xls') {
                     const panel = document.getElementById('excel-menu-panel');
                     if (panel) panel.hidden = true;
-                    download('star-risk-review-results.xls', toXls(records), 'application/vnd.ms-excel;charset=utf-8');
+                    exportXlsWithCustomName().catch(error => alert(error.message || '导出失败：未知错误'));
+                    return;
                 }
             });
             document.addEventListener('keydown', event => {
@@ -3681,15 +3780,16 @@ function openDataSourceSettings() {
                     showLoading(`正在载入并解析 ${file.name}，请稍候...`, '0%');
                     setTimeout(async () => {
                         try {
-                            const text = await readFileTextWithProgress(file);
-                            showLoading(`正在解析 ${file.name}，请稍候...`, '60%');
-                            const parsed = parseReviewData(text);
-                            if (parsed.errors.length) alert(`有 ${parsed.errors.length} 行解析失败，已跳过`);
+                            setDataSourceMode('local');
+                            stopFeishuSilentSyncForLocalMode();
+                            const parsed = await parseLocalDataFile(file);
+                            if (parsed.errors && parsed.errors.length) showToast(parsed.errors[0].message || `有 ${parsed.errors.length} 行解析提示`);
                             localStorage.removeItem(STORAGE_KEY);
-                            showLoading(`正在渲染 ${file.name}，请稍候...`, '90%');
+                            showLoading(`正在渲染 ${file.name}，请稍候...`, '');
                             setRecords(parsed.records, false);
-                            showLoading(`加载完成 ${file.name}`, '100%');
-                            setText('source-label', `数据源：${file.name}`);
+                            showLoading(`加载完成 ${file.name}`, '');
+                            setText('source-label', `数据源：线下文件 / ${file.name} / ${parsed.records.length} 条`);
+                            updateTopSyncStatus('实时保存');
                         } catch (err) {
                             alert('导入失败: ' + err.message);
                         } finally {
@@ -3710,6 +3810,241 @@ function openDataSourceSettings() {
                     flushReviewWriteQueue(false);
                 }
             });
+        }
+
+
+        async function parseLocalDataFile(file) {
+            const lowerName = String(file && file.name || '').toLowerCase();
+            const supported = /\.(xlsx|xls|csv|tsv|txt|xml|html?|ndjson|json)$/i.test(lowerName);
+            if (!supported) {
+                throw new Error('当前版本支持 .xlsx / .xls / .csv / .tsv / .xml / .html / .json / .ndjson 文件。');
+            }
+
+            const buffer = await readFileArrayBufferWithProgress(file);
+            showLoading(`正在解析 ${file.name}，请稍候...`, '');
+
+            const isExcelLike = /\.(xlsx|xls)$/i.test(lowerName);
+            if (isExcelLike && window.XLSX) {
+                try {
+                    const workbook = XLSX.read(buffer, {
+                        type: 'array',
+                        cellDates: true,
+                        cellText: false,
+                        raw: false,
+                        WTF: false,
+                    });
+                    const parsed = parseWorkbookToRecords(workbook);
+                    if (parsed.records.length) return parsed;
+                } catch (error) {
+                    console.warn('按二进制 Excel 解析失败，尝试文本/另存为格式 fallback', error);
+                }
+            }
+
+            const text = decodeLocalFileText(new Uint8Array(buffer));
+            const parsedText = parseReviewData(text);
+            if (parsedText.records && parsedText.records.length) {
+                return parsedText;
+            }
+
+            if (/<table[\s>]/i.test(text)) {
+                const parsedHtml = parseHtmlTable(text);
+                if (parsedHtml.records.length) return parsedHtml;
+            }
+
+            if (isExcelLike && !window.XLSX) {
+                throw new Error('检测到 xlsx/xls 文件，但 Excel 二进制解析库未加载成功。当前文件如果是真正的二进制 xlsx，不能按文本读取；请确认网络可访问 cdn.jsdelivr.net，或另存为 CSV/XML 后导入。');
+            }
+
+            throw new Error('文件已读取，但未识别到有效数据。请确认第一张有效工作表有表头和数据行。');
+        }
+
+        async function readFileArrayBufferWithProgress(file) {
+            if (!file.stream) {
+                return await file.arrayBuffer();
+            }
+
+            const reader = file.stream().getReader();
+            const chunks = [];
+            let loaded = 0;
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+                loaded += value.byteLength || value.length || 0;
+                showLoading(`正在读取 ${file.name}，请稍候...`, '');
+            }
+
+            const bytes = new Uint8Array(loaded);
+            let offset = 0;
+            chunks.forEach(chunk => {
+                bytes.set(chunk, offset);
+                offset += chunk.byteLength || chunk.length || 0;
+            });
+            return bytes.buffer;
+        }
+
+        function decodeLocalFileText(bytes) {
+            if (!bytes || !bytes.length) return '';
+            if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+                return new TextDecoder('utf-16le').decode(bytes);
+            }
+            if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+                return new TextDecoder('utf-16be').decode(bytes);
+            }
+            return new TextDecoder('utf-8').decode(bytes);
+        }
+
+        function parseWorkbookToRecords(workbook) {
+            const best = pickBestWorksheet(workbook);
+            if (!best) return { records: [], errors: [{ line: 1, message: '未找到有效工作表' }] };
+            const converted = worksheetRowsToObjects(best.rows);
+            return {
+                records: converted.rows,
+                errors: converted.skippedRows ? [{ line: converted.headerRow + 1, message: `已自动跳过表头前空行 ${converted.skippedRows} 行` }] : []
+            };
+        }
+
+        function pickBestWorksheet(workbook) {
+            let best = null;
+            (workbook.SheetNames || []).forEach(sheetName => {
+                const sheet = workbook.Sheets[sheetName];
+                if (!sheet) return;
+                let rows = XLSX.utils.sheet_to_json(sheet, {
+                    header: 1,
+                    defval: '',
+                    raw: false,
+                    blankrows: false,
+                });
+                rows = normalizeSheetRows(rows);
+                if (!rows.length) return;
+                const score = scoreWorksheetRows(rows);
+                if (!best || score > best.score) best = { sheetName, rows, score };
+            });
+            return best;
+        }
+
+        function normalizeSheetRows(rows) {
+            return (rows || [])
+                .map(row => (Array.isArray(row) ? row : []).map(normalizeExcelCell))
+                .filter(row => row.some(cell => String(cell || '').trim() !== ''));
+        }
+
+        function normalizeExcelCell(value) {
+            if (value == null) return '';
+            if (value instanceof Date) {
+                const pad = n => String(n).padStart(2, '0');
+                return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}`;
+            }
+            if (typeof value === 'object') {
+                if ('text' in value) return String(value.text || '').trim();
+                if ('w' in value) return String(value.w || '').trim();
+                if ('v' in value) return String(value.v || '').trim();
+                return String(JSON.stringify(value)).trim();
+            }
+            return String(value)
+                .replace(/\u00A0/g, ' ')
+                .replace(/\r\n/g, '\n')
+                .trim();
+        }
+
+        function scoreWorksheetRows(rows) {
+            const headerIndex = detectHeaderRowIndex(rows);
+            const header = rows[headerIndex] || [];
+            const known = countKnownHeaderCells(header);
+            const width = header.filter(Boolean).length;
+            const dataRows = Math.max(0, rows.length - headerIndex - 1);
+            return known * 1000 + Math.min(width, 80) * 10 + Math.min(dataRows, 500);
+        }
+
+        function detectHeaderRowIndex(rows) {
+            const max = Math.min(rows.length, 20);
+            let fallback = 0;
+            for (let i = 0; i < max; i++) {
+                const row = rows[i] || [];
+                const nonEmpty = row.filter(v => String(v || '').trim()).length;
+                if (nonEmpty >= 2 && fallback === 0) fallback = i;
+                const known = countKnownHeaderCells(row);
+                if (known >= 2) return i;
+            }
+            return fallback;
+        }
+
+        function countKnownHeaderCells(row) {
+            const knownKeys = [
+                'spu', 'spu id', 'spuid', '商品id', '商品标题', '标题', '品牌',
+                '明星同款', '明星', '一级类目', '二级类目', '三级类目',
+                '送审图片', '图片', '规格首图', '社区链接', '站外链接',
+                '复审结果', '审核状态', '不通过原因', '审核备注', '复审时间', '审核时间'
+            ];
+            return (row || []).reduce((count, cell) => {
+                const text = String(cell || '').trim().toLowerCase();
+                if (!text) return count;
+                return count + (knownKeys.some(key => text === key || text.includes(key)) ? 1 : 0);
+            }, 0);
+        }
+
+        function worksheetRowsToObjects(rows) {
+            const headerRow = detectHeaderRowIndex(rows);
+            const headers = makeUniqueHeaders(rows[headerRow] || []);
+            const dataRows = rows.slice(headerRow + 1);
+            const objects = [];
+
+            dataRows.forEach((row, rowOffset) => {
+                const obj = {};
+                let nonEmpty = 0;
+                headers.forEach((header, colIndex) => {
+                    const key = header || `列${colIndex + 1}`;
+                    const value = normalizeExcelCell(row[colIndex]);
+                    if (value) nonEmpty += 1;
+                    obj[key] = value;
+                });
+                if (nonEmpty) {
+                    obj.__sourceRowNumber = headerRow + rowOffset + 2;
+                    objects.push(obj);
+                }
+            });
+
+            return { rows: objects, headerRow, skippedRows: headerRow };
+        }
+
+        function makeUniqueHeaders(headerRow) {
+            const seen = Object.create(null);
+            return (headerRow || []).map((cell, index) => {
+                let name = normalizeExcelCell(cell)
+                    .replace(/\n+/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                if (!name) name = `列${index + 1}`;
+                const base = name;
+                seen[base] = (seen[base] || 0) + 1;
+                if (seen[base] > 1) name = `${base}_${seen[base]}`;
+                return name;
+            });
+        }
+
+        function parseHtmlTable(text) {
+            try {
+                const doc = new DOMParser().parseFromString(String(text || ''), 'text/html');
+                const tables = Array.from(doc.querySelectorAll('table'));
+                let best = null;
+
+                tables.forEach(table => {
+                    const rows = Array.from(table.querySelectorAll('tr')).map(tr =>
+                        Array.from(tr.children).map(td => normalizeExcelCell(td.textContent || ''))
+                    );
+                    const normalized = normalizeSheetRows(rows);
+                    if (!normalized.length) return;
+                    const score = scoreWorksheetRows(normalized);
+                    if (!best || score > best.score) best = { rows: normalized, score };
+                });
+
+                if (!best) return { records: [], errors: [] };
+                const converted = worksheetRowsToObjects(best.rows);
+                return { records: converted.rows, errors: [] };
+            } catch (error) {
+                console.warn('HTML 表格解析失败', error);
+                return { records: [], errors: [{ line: 1, message: error.message }] };
+            }
         }
 
         async function readFileTextWithProgress(file) {
@@ -3760,20 +4095,34 @@ function openDataSourceSettings() {
                     overlay.appendChild(detail);
                 }
 
-                const countdownText = countdown != null ? String(countdown) : '';
+                const localMode = isLocalFileMode();
                 const countdownEl = document.getElementById('loading-countdown');
-                if (countdownEl) {
-                    const percentMatch = countdownText.match(/\d+(?:\.\d+)?%/);
-                    countdownEl.textContent = percentMatch ? percentMatch[0] : countdownText;
-                }
 
-                const bar = overlay.querySelector('.loading-progress-bar');
-                const percentMatch = countdownText.match(/(\d+(?:\.\d+)?)%/);
-                if (bar) {
-                    const percent = percentMatch ? Math.max(0, Math.min(100, Number(percentMatch[1]))) : 0;
-                    bar.style.width = percent + '%';
+                if (localMode) {
+                    if (countdownEl) {
+                        countdownEl.textContent = '';
+                        countdownEl.hidden = true;
+                    }
+                    track.hidden = true;
+                    detail.hidden = true;
+                } else {
+                    const countdownText = countdown != null ? String(countdown) : '';
+                    if (countdownEl) {
+                        countdownEl.hidden = false;
+                        const percentMatch = countdownText.match(/\d+(?:\.\d+)?%/);
+                        countdownEl.textContent = percentMatch ? percentMatch[0] : countdownText;
+                    }
+
+                    const bar = overlay.querySelector('.loading-progress-bar');
+                    const percentMatch = countdownText.match(/(\d+(?:\.\d+)?)%/);
+                    if (bar) {
+                        const percent = percentMatch ? Math.max(0, Math.min(100, Number(percentMatch[1]))) : 0;
+                        bar.style.width = percent + '%';
+                    }
+                    track.hidden = false;
+                    detail.hidden = false;
+                    detail.textContent = countdownText;
                 }
-                detail.textContent = countdownText;
 
                 overlay.classList.remove('fade-out');
             }
@@ -3921,8 +4270,12 @@ function openDataSourceSettings() {
             const savedFeishuConfig = readFeishuConfig();
             if (claimCount) claimCount.value = savedFeishuConfig.claimCount || 20;
             setRecords([], false, true);
-            startFeishuSilentSync();
-            setTimeout(silentSyncFeishuData, 1200);
+            if (isLocalFileMode()) {
+                stopFeishuSilentSyncForLocalMode();
+            } else {
+                startFeishuSilentSync();
+                setTimeout(silentSyncFeishuData, 1200);
+            }
             hideLoading();
         }
 
