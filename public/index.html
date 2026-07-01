@@ -1598,6 +1598,7 @@
         const STORAGE_KEY = 'starRiskReviewProgress:v1';
         const DATA_SOURCE_MODE_KEY = 'starRiskReviewDataSourceMode:v1';
         const PENDING_REVIEW_KEY = 'starRiskReviewPendingReviews:v1';
+        const PENDING_CONFIRM_TTL = 24 * 60 * 60 * 1000;
         let records = [];
         let filteredRecords = null;
         let activeRecordKey = '';
@@ -1815,7 +1816,10 @@ function openDataSourceSettings() {
             const line = document.getElementById('sync-status-line');
             if (!line) return;
             const queueSize = reviewWriteQueue ? reviewWriteQueue.size : 0;
-            const writeText = reviewWriteRunning ? '回写中' : (queueSize ? `待回写 ${queueSize} 条` : reviewLastWriteText);
+            const pendingConfirmSize = pendingReviewRows ? pendingReviewRows.size : 0;
+            const writeText = reviewWriteRunning
+                ? '回写中'
+                : (queueSize ? `待回写 ${queueSize} 条` : (pendingConfirmSize ? `待远端确认 ${pendingConfirmSize} 条` : reviewLastWriteText));
 
             if (isLocalFileMode()) {
                 line.textContent = `线下模式：本地复审进度实时保存 / ${writeText}${extra ? ' / ' + extra : ''}`;
@@ -1844,9 +1848,15 @@ function openDataSourceSettings() {
                 const raw = JSON.parse(localStorage.getItem(PENDING_REVIEW_KEY) || '{}');
                 const entries = Array.isArray(raw) ? raw : Object.values(raw || {});
                 const map = new Map();
+                const now = Date.now();
                 entries.forEach(item => {
                     const key = getReviewRowKey(item && item.remoteRowIndex);
-                    if (key) map.set(key, item);
+                    if (!key) return;
+                    const localEditAt = Number(item.localEditAt || 0);
+                    const writeConfirmedAt = Number(item.writeConfirmedAt || 0);
+                    const latestTs = Math.max(localEditAt, writeConfirmedAt);
+                    if (latestTs && now - latestTs > PENDING_CONFIRM_TTL) return;
+                    map.set(key, item);
                 });
                 return map;
             } catch (error) {
@@ -1895,9 +1905,26 @@ function openDataSourceSettings() {
             const pendingReason = String(pending.reviewReason || '').trim();
             const pendingTime = String(pending.reviewTime || '').trim();
 
-            return remoteStatus === pendingStatus
-                && remoteReason === pendingReason
-                && (!pendingTime || remoteTime === pendingTime);
+            if (remoteStatus !== pendingStatus) return false;
+            if (remoteReason !== pendingReason) return false;
+
+            // 飞书/Excel 有时会把时间格式改写，状态+原因一致即可认为远端已经追上。
+            if (!pendingTime || !remoteTime) return true;
+            return remoteTime === pendingTime || remoteTime.startsWith(pendingTime) || pendingTime.startsWith(remoteTime);
+        }
+
+        function markWriteConfirmed(item) {
+            const key = getReviewRowKey(item && item.remoteRowIndex);
+            if (!key) return;
+            const current = pendingReviewRows.get(key) || item;
+            const next = Object.assign({}, current, {
+                remoteRowIndex: Number(current.remoteRowIndex || item.remoteRowIndex),
+                writeConfirmedAt: Date.now()
+            });
+            pendingReviewRows.set(key, next);
+            reviewWriteQueue.delete(key);
+            activeWriteRows.delete(key);
+            persistPendingReviewRows();
         }
 
         function clearPendingReview(item) {
@@ -1983,7 +2010,7 @@ function openDataSourceSettings() {
         async function flushReviewWriteQueue(force) {
             if (reviewWriteRunning) return;
             if (!reviewWriteQueue || !reviewWriteQueue.size) {
-                reviewLastWriteText = '无待处理';
+                reviewLastWriteText = pendingReviewRows && pendingReviewRows.size ? `待远端确认 ${pendingReviewRows.size} 条` : '无待处理';
                 updateTopSyncStatus();
                 return;
             }
@@ -2001,8 +2028,12 @@ function openDataSourceSettings() {
 
             try {
                 const data = await feishuSheetApi('batchUpdateReviews', { records: batch });
-                batch.forEach(clearPendingReview);
-                reviewLastWriteText = `已回写 ${data.count || batch.length} 条 ${formatClockTime(Date.now())}`;
+
+                // 关键：写接口返回成功不代表下一轮读接口马上能读到新值。
+                // 所以这里只标记“写回已提交，等待远端确认”，不清除本地保护。
+                batch.forEach(markWriteConfirmed);
+
+                reviewLastWriteText = `已提交 ${data.count || batch.length} 条，待远端确认 ${pendingReviewRows.size} 条`;
             } catch (error) {
                 batch.forEach(item => {
                     const key = getReviewRowKey(item && item.remoteRowIndex);
@@ -2150,6 +2181,8 @@ function openDataSourceSettings() {
 
             let changed = 0;
             let protectedCount = 0;
+            let confirmedCount = 0;
+
             dynamicRows.forEach(row => {
                 const remoteRow = Number(row.__rowIndex || 0);
                 const record = map.get(remoteRow);
@@ -2159,6 +2192,8 @@ function openDataSourceSettings() {
                 if (protectedReview) {
                     if (remoteRowMatchesPending(row, protectedReview)) {
                         clearPendingReview(protectedReview);
+                        confirmedCount += 1;
+                        // 远端已经追上，继续把远端规范值落到本地。
                     } else {
                         if (applyReviewPayloadToRecord(record, protectedReview)) changed += 1;
                         protectedCount += 1;
@@ -2199,11 +2234,11 @@ function openDataSourceSettings() {
                 if (rowChanged) changed += 1;
             });
 
-            if (protectedCount) {
-                feishuLastSyncText = `动态同步已保护本地待回写 ${protectedCount} 条`;
+            if (protectedCount || confirmedCount) {
+                feishuLastSyncText = `动态同步：保护本地 ${protectedCount} 条 / 确认 ${confirmedCount} 条`;
             }
 
-            if (changed) {
+            if (changed || protectedCount || confirmedCount) {
                 filteredRecords = null;
                 lastFiltersCache = '';
                 populateFilters();
@@ -3108,12 +3143,15 @@ function openDataSourceSettings() {
             let brandNameSet = new Set();
             let handlerNameSet = new Set();
 
+            const keepPage = append ? currentPage : 0;
+
             if (append) {
                 records = mergeAndDeduplicate(records, rows, alreadyNormalized);
             } else {
                 records = mergeAndDeduplicate([], rows, alreadyNormalized);
             }
 
+            applyProgress();
             applyPendingReviewOverlay(records);
 
             recordMap.clear();
@@ -3165,10 +3203,9 @@ function openDataSourceSettings() {
                 handlerName: sortZh(Array.from(handlerNameSet)),
             };
 
-            currentPage = 0;
+            currentPage = keepPage;
             filteredRecords = null;
             lastFiltersCache = '';
-            applyProgress();
             populateFilters();
             render();
         }
