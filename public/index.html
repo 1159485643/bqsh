@@ -1597,6 +1597,7 @@
 
         const STORAGE_KEY = 'starRiskReviewProgress:v1';
         const DATA_SOURCE_MODE_KEY = 'starRiskReviewDataSourceMode:v1';
+        const PENDING_REVIEW_KEY = 'starRiskReviewPendingReviews:v1';
         let records = [];
         let filteredRecords = null;
         let activeRecordKey = '';
@@ -1796,6 +1797,8 @@ function openDataSourceSettings() {
         let reviewWriteTimer = null;
         let reviewWriteDebounceTimer = null;
         let reviewWriteQueue = new Map();
+        let pendingReviewRows = loadPendingReviewRows();
+        let activeWriteRows = new Map();
         let reviewWriteRunning = false;
         let reviewLastWriteText = '无待处理';
 
@@ -1831,6 +1834,129 @@ function openDataSourceSettings() {
             setInterval(updateTopSyncStatus, 1000);
         }
 
+        function getReviewRowKey(rowIndex) {
+            const row = Number(rowIndex || 0);
+            return Number.isFinite(row) && row > 0 ? String(row) : '';
+        }
+
+        function loadPendingReviewRows() {
+            try {
+                const raw = JSON.parse(localStorage.getItem(PENDING_REVIEW_KEY) || '{}');
+                const entries = Array.isArray(raw) ? raw : Object.values(raw || {});
+                const map = new Map();
+                entries.forEach(item => {
+                    const key = getReviewRowKey(item && item.remoteRowIndex);
+                    if (key) map.set(key, item);
+                });
+                return map;
+            } catch (error) {
+                console.warn('读取待回写保护队列失败，已重置', error);
+                return new Map();
+            }
+        }
+
+        function persistPendingReviewRows() {
+            const obj = {};
+            pendingReviewRows.forEach((item, key) => {
+                if (key && item) obj[key] = item;
+            });
+            localStorage.setItem(PENDING_REVIEW_KEY, JSON.stringify(obj));
+        }
+
+        function markPendingReview(item) {
+            const key = getReviewRowKey(item && item.remoteRowIndex);
+            if (!key) return null;
+            const payload = Object.assign({}, item, {
+                remoteRowIndex: Number(item.remoteRowIndex),
+                localEditAt: Number(item.localEditAt || Date.now())
+            });
+            pendingReviewRows.set(key, payload);
+            persistPendingReviewRows();
+            return payload;
+        }
+
+        function getPendingReview(rowIndex) {
+            const key = getReviewRowKey(rowIndex);
+            return key ? pendingReviewRows.get(key) : null;
+        }
+
+        function getProtectedReview(rowIndex) {
+            const key = getReviewRowKey(rowIndex);
+            if (!key) return null;
+            return pendingReviewRows.get(key) || activeWriteRows.get(key) || reviewWriteQueue.get(key) || null;
+        }
+
+        function remoteRowMatchesPending(row, pending) {
+            if (!row || !pending) return false;
+            const remoteStatus = normalizeStatus(row['审核状态'] || row['复审结果'] || row['是否通过'] || '');
+            const remoteReason = String(row['审核备注'] || row['不通过原因'] || '').trim();
+            const remoteTime = String(row['审核时间'] || row['复审时间'] || '').trim();
+            const pendingStatus = normalizeStatus(pending.reviewStatus || '');
+            const pendingReason = String(pending.reviewReason || '').trim();
+            const pendingTime = String(pending.reviewTime || '').trim();
+
+            return remoteStatus === pendingStatus
+                && remoteReason === pendingReason
+                && (!pendingTime || remoteTime === pendingTime);
+        }
+
+        function clearPendingReview(item) {
+            const key = getReviewRowKey(item && item.remoteRowIndex);
+            if (!key) return;
+            const current = pendingReviewRows.get(key);
+            if (!current || !item.localEditAt || Number(current.localEditAt || 0) === Number(item.localEditAt || 0)) {
+                pendingReviewRows.delete(key);
+                reviewWriteQueue.delete(key);
+                persistPendingReviewRows();
+            }
+            activeWriteRows.delete(key);
+        }
+
+        function applyReviewPayloadToRecord(record, payload) {
+            if (!record || !payload) return false;
+            let changed = false;
+            const nextHandler = String(payload.handlerName || '').trim();
+            const nextStatus = normalizeStatus(payload.reviewStatus || '');
+            const nextReason = String(payload.reviewReason || '').trim();
+            const nextTime = String(payload.reviewTime || '').trim();
+
+            if (nextHandler && (record.handlerName || '') !== nextHandler) {
+                record.handlerName = nextHandler;
+                changed = true;
+            }
+            if ((record.reviewStatus || '') !== nextStatus) {
+                record.reviewStatus = nextStatus;
+                changed = true;
+            }
+            if ((record.reviewReason || '') !== nextReason) {
+                record.reviewReason = nextReason;
+                changed = true;
+            }
+            if (nextTime && (record.reviewTime || '') !== nextTime) {
+                record.reviewTime = nextTime;
+                changed = true;
+            }
+
+            if (record.raw) {
+                if (nextHandler) record.raw['处理人'] = nextHandler;
+                record.raw['审核状态'] = nextStatus === 'approved' ? '通过' : nextStatus === 'rejected' ? '不通过' : '';
+                record.raw['审核备注'] = nextReason;
+                if (nextTime) record.raw['审核时间'] = nextTime;
+            }
+            return changed;
+        }
+
+        function applyPendingReviewOverlay(targetRecords = records) {
+            if (!pendingReviewRows || !pendingReviewRows.size || !targetRecords || !targetRecords.length) return 0;
+            let changed = 0;
+            targetRecords.forEach(record => {
+                const row = getRemoteRowIndex(record);
+                const pending = getPendingReview(row);
+                if (pending && applyReviewPayloadToRecord(record, pending)) changed += 1;
+            });
+            return changed;
+        }
+
         function compactReviewRecord(record) {
             const rowIndex = getRemoteRowIndex(record);
             return {
@@ -1838,7 +1964,8 @@ function openDataSourceSettings() {
                 reviewStatus: record.reviewStatus || '',
                 reviewReason: record.reviewReason || '',
                 reviewTime: record.reviewTime || '',
-                handlerName: record.handlerName || (record.raw && record.raw[FEISHU_FIXED_FIELDS.handler]) || ''
+                handlerName: record.handlerName || (record.raw && record.raw[FEISHU_FIXED_FIELDS.handler]) || '',
+                localEditAt: Number(record.localEditAt || Date.now())
             };
         }
 
@@ -1863,21 +1990,35 @@ function openDataSourceSettings() {
 
             const batch = Array.from(reviewWriteQueue.values());
             reviewWriteQueue.clear();
+            batch.forEach(item => {
+                const key = getReviewRowKey(item && item.remoteRowIndex);
+                if (key) activeWriteRows.set(key, item);
+            });
+
             reviewWriteRunning = true;
             reviewLastWriteText = `回写中 ${batch.length} 条`;
             updateTopSyncStatus();
 
             try {
                 const data = await feishuSheetApi('batchUpdateReviews', { records: batch });
+                batch.forEach(clearPendingReview);
                 reviewLastWriteText = `已回写 ${data.count || batch.length} 条 ${formatClockTime(Date.now())}`;
             } catch (error) {
                 batch.forEach(item => {
-                    if (item && item.remoteRowIndex) reviewWriteQueue.set(String(item.remoteRowIndex), item);
+                    const key = getReviewRowKey(item && item.remoteRowIndex);
+                    if (!key) return;
+                    activeWriteRows.delete(key);
+                    const latest = pendingReviewRows.get(key) || item;
+                    reviewWriteQueue.set(key, latest);
                 });
-                reviewLastWriteText = '回写失败，稍后重试';
+                reviewLastWriteText = `回写失败，保留本地 ${pendingReviewRows.size} 条`;
                 console.error('周期回写失败', error);
                 if (force) alert('回写飞书失败：\n' + error.message);
             } finally {
+                batch.forEach(item => {
+                    const key = getReviewRowKey(item && item.remoteRowIndex);
+                    if (key) activeWriteRows.delete(key);
+                });
                 reviewWriteRunning = false;
                 updateTopSyncStatus();
             }
@@ -2008,10 +2149,22 @@ function openDataSourceSettings() {
             });
 
             let changed = 0;
+            let protectedCount = 0;
             dynamicRows.forEach(row => {
                 const remoteRow = Number(row.__rowIndex || 0);
                 const record = map.get(remoteRow);
                 if (!record) return;
+
+                const protectedReview = getProtectedReview(remoteRow);
+                if (protectedReview) {
+                    if (remoteRowMatchesPending(row, protectedReview)) {
+                        clearPendingReview(protectedReview);
+                    } else {
+                        if (applyReviewPayloadToRecord(record, protectedReview)) changed += 1;
+                        protectedCount += 1;
+                        return;
+                    }
+                }
 
                 const nextHandler = String(row['处理人'] || '').trim();
                 const nextStatus = normalizeStatus(row['审核状态'] || row['复审结果'] || row['是否通过'] || '');
@@ -2045,6 +2198,10 @@ function openDataSourceSettings() {
 
                 if (rowChanged) changed += 1;
             });
+
+            if (protectedCount) {
+                feishuLastSyncText = `动态同步已保护本地待回写 ${protectedCount} 条`;
+            }
 
             if (changed) {
                 filteredRecords = null;
@@ -2256,6 +2413,8 @@ function openDataSourceSettings() {
 
         async function syncReviewToFeishu(record) {
             if (!record) return;
+            if (isLocalFileMode()) return;
+
             const config = readFeishuConfig();
             if (!config.feishuUrl) return;
             if (!config.appId || !config.appSecret) {
@@ -2269,8 +2428,9 @@ function openDataSourceSettings() {
             }
 
             const compact = compactReviewRecord(record);
-            reviewWriteQueue.set(String(compact.remoteRowIndex), compact);
-            reviewLastWriteText = `待回写 ${reviewWriteQueue.size} 条`;
+            const pending = markPendingReview(compact);
+            reviewWriteQueue.set(String(compact.remoteRowIndex), pending || compact);
+            reviewLastWriteText = `待回写 ${reviewWriteQueue.size} 条 / 本地保护 ${pendingReviewRows.size} 条`;
             updateTopSyncStatus();
             scheduleReviewWriteSoon();
         }
@@ -2954,6 +3114,8 @@ function openDataSourceSettings() {
                 records = mergeAndDeduplicate([], rows, alreadyNormalized);
             }
 
+            applyPendingReviewOverlay(records);
+
             recordMap.clear();
             records.forEach(record => {
                 recordMap.set(record._key, record);
@@ -3393,6 +3555,7 @@ function openDataSourceSettings() {
             record.reviewStatus = status;
             record.reviewReason = status === 'rejected' ? finalReason : '';
             record.reviewTime = nowText();
+            record.localEditAt = Date.now();
             saveProgress(record);
             render(true);
             syncReviewToFeishu(record);
@@ -3781,6 +3944,10 @@ function openDataSourceSettings() {
                     setTimeout(async () => {
                         try {
                             setDataSourceMode('local');
+                            pendingReviewRows.clear();
+                            activeWriteRows.clear();
+                            reviewWriteQueue.clear();
+                            persistPendingReviewRows();
                             stopFeishuSilentSyncForLocalMode();
                             const parsed = await parseLocalDataFile(file);
                             if (parsed.errors && parsed.errors.length) showToast(parsed.errors[0].message || `有 ${parsed.errors.length} 行解析提示`);
