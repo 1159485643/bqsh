@@ -1133,6 +1133,46 @@
             max-width: min(1180px, 96vw);
             max-height: 88vh;
         }
+        #image-preview-modal {
+            overflow: hidden;
+        }
+        #image-preview-modal .modal-stage {
+            overflow: visible;
+            user-select: none;
+            touch-action: none;
+        }
+        #preview-modal-img {
+            max-width: min(1180px, 96vw);
+            max-height: 88vh;
+            object-fit: contain;
+            transform-origin: center center;
+            will-change: transform;
+            cursor: grab;
+            user-select: none;
+            transition: transform .08s ease-out;
+        }
+        #preview-modal-img.dragging {
+            cursor: grabbing;
+            transition: none;
+        }
+        .image-zoom-toolbar {
+            position: absolute;
+            left: 50%;
+            bottom: -46px;
+            transform: translateX(-50%);
+            z-index: 3;
+            min-width: 236px;
+            padding: 7px 12px;
+            border: 1px solid rgba(255, 255, 255, .20);
+            border-radius: 999px;
+            background: rgba(15, 23, 42, .86);
+            color: #d8e7fb;
+            font-size: 12px;
+            text-align: center;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, .28);
+            pointer-events: none;
+            white-space: nowrap;
+        }
         .modal-close {
             position: absolute;
             top: -16px;
@@ -1571,6 +1611,7 @@
         <div class="modal-stage">
             <button class="modal-close" id="btn-close-image-preview" type="button" aria-label="关闭图片预览">×</button>
             <img id="preview-modal-img" alt="图片预览" draggable="false">
+            <div class="image-zoom-toolbar" id="image-zoom-toolbar">滚轮缩放 · 拖拽移动 · 双击还原 · 100%</div>
         </div>
     </div>
 
@@ -1604,6 +1645,18 @@
         let activeRecordKey = '';
         let pendingRejectKey = '';
         let currentPage = 0;
+        const imagePreviewZoom = {
+            scale: 1,
+            x: 0,
+            y: 0,
+            dragging: false,
+            startX: 0,
+            startY: 0,
+            originX: 0,
+            originY: 0,
+            bound: false,
+        };
+
 
         function setDataSourceMode(mode) {
             localStorage.setItem(DATA_SOURCE_MODE_KEY, mode || 'feishu');
@@ -3768,6 +3821,128 @@ function openDataSourceSettings() {
             return xml;
         }
 
+        function clampNumber(value, min, max) {
+            return Math.max(min, Math.min(max, Number(value) || 0));
+        }
+
+        function applyImagePreviewTransform() {
+            const img = document.getElementById('preview-modal-img');
+            const toolbar = document.getElementById('image-zoom-toolbar');
+            if (!img) return;
+            const scale = clampNumber(imagePreviewZoom.scale, 1, 8);
+            imagePreviewZoom.scale = scale;
+
+            if (scale <= 1.0001) {
+                imagePreviewZoom.x = 0;
+                imagePreviewZoom.y = 0;
+            }
+
+            img.style.transform = `translate(${imagePreviewZoom.x}px, ${imagePreviewZoom.y}px) scale(${scale})`;
+            if (toolbar) {
+                toolbar.textContent = `滚轮缩放 · 拖拽移动 · 双击还原 · ${Math.round(scale * 100)}%`;
+            }
+        }
+
+        function resetImagePreviewZoom() {
+            imagePreviewZoom.scale = 1;
+            imagePreviewZoom.x = 0;
+            imagePreviewZoom.y = 0;
+            imagePreviewZoom.dragging = false;
+            const img = document.getElementById('preview-modal-img');
+            if (img) img.classList.remove('dragging');
+            applyImagePreviewTransform();
+        }
+
+        function openImagePreview(url) {
+            const modal = document.getElementById('image-preview-modal');
+            const img = document.getElementById('preview-modal-img');
+            if (!modal || !img || !url) return;
+            resetImagePreviewZoom();
+            img.src = url;
+            modal.hidden = false;
+            requestAnimationFrame(resetImagePreviewZoom);
+        }
+
+        function closeImagePreview() {
+            const modal = document.getElementById('image-preview-modal');
+            const img = document.getElementById('preview-modal-img');
+            if (modal) modal.hidden = true;
+            if (img) {
+                img.classList.remove('dragging');
+                img.style.transform = '';
+            }
+            imagePreviewZoom.dragging = false;
+            resetImagePreviewZoom();
+        }
+
+        function zoomImagePreview(deltaY, clientX, clientY) {
+            const img = document.getElementById('preview-modal-img');
+            if (!img) return;
+            const oldScale = imagePreviewZoom.scale || 1;
+            const factor = deltaY < 0 ? 1.16 : 1 / 1.16;
+            const nextScale = clampNumber(oldScale * factor, 1, 8);
+
+            if (Math.abs(nextScale - oldScale) < 0.001) return;
+
+            // 以鼠标位置为参考缩放，避免图片突然跳动。
+            const rect = img.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            const offsetX = Number(clientX || centerX) - centerX;
+            const offsetY = Number(clientY || centerY) - centerY;
+            const ratio = nextScale / oldScale;
+
+            imagePreviewZoom.x = (imagePreviewZoom.x - offsetX) * ratio + offsetX;
+            imagePreviewZoom.y = (imagePreviewZoom.y - offsetY) * ratio + offsetY;
+            imagePreviewZoom.scale = nextScale;
+            applyImagePreviewTransform();
+        }
+
+        function bindImagePreviewZoomEvents() {
+            if (imagePreviewZoom.bound) return;
+            imagePreviewZoom.bound = true;
+
+            const modal = document.getElementById('image-preview-modal');
+            const img = document.getElementById('preview-modal-img');
+            if (!modal || !img) return;
+
+            modal.addEventListener('wheel', event => {
+                if (modal.hidden) return;
+                event.preventDefault();
+                zoomImagePreview(event.deltaY, event.clientX, event.clientY);
+            }, { passive: false });
+
+            img.addEventListener('dblclick', event => {
+                event.preventDefault();
+                resetImagePreviewZoom();
+            });
+
+            img.addEventListener('mousedown', event => {
+                if (modal.hidden || imagePreviewZoom.scale <= 1.0001) return;
+                event.preventDefault();
+                imagePreviewZoom.dragging = true;
+                imagePreviewZoom.startX = event.clientX;
+                imagePreviewZoom.startY = event.clientY;
+                imagePreviewZoom.originX = imagePreviewZoom.x;
+                imagePreviewZoom.originY = imagePreviewZoom.y;
+                img.classList.add('dragging');
+            });
+
+            window.addEventListener('mousemove', event => {
+                if (!imagePreviewZoom.dragging) return;
+                event.preventDefault();
+                imagePreviewZoom.x = imagePreviewZoom.originX + (event.clientX - imagePreviewZoom.startX);
+                imagePreviewZoom.y = imagePreviewZoom.originY + (event.clientY - imagePreviewZoom.startY);
+                applyImagePreviewTransform();
+            });
+
+            window.addEventListener('mouseup', () => {
+                if (!imagePreviewZoom.dragging) return;
+                imagePreviewZoom.dragging = false;
+                img.classList.remove('dragging');
+            });
+        }
+
         function bindEvents() {
             document.querySelectorAll('.filters .control').forEach(el => {
                 if (el.id === 'filter-query') {
@@ -3882,12 +4057,7 @@ function openDataSourceSettings() {
                 }
                 const preview = target.closest('[data-preview-url]');
                 if (preview) {
-                    const modal = document.getElementById('image-preview-modal');
-                    const img = document.getElementById('preview-modal-img');
-                    if (modal && img) {
-                        img.src = preview.getAttribute('data-preview-url');
-                        modal.hidden = false;
-                    }
+                    openImagePreview(preview.getAttribute('data-preview-url'));
                     return;
                 }
                 const approve = target.closest('[data-approve]');
@@ -3941,8 +4111,8 @@ function openDataSourceSettings() {
                     currentPage += 1;
                     render();
                 }
-                if (target.id === 'image-preview-modal') target.hidden = true;
-                if (target.id === 'btn-close-image-preview') document.getElementById('image-preview-modal').hidden = true;
+                if (target.id === 'image-preview-modal') closeImagePreview();
+                if (target.id === 'btn-close-image-preview') closeImagePreview();
                 if (target.id === 'btn-export-xls') {
                     const panel = document.getElementById('excel-menu-panel');
                     if (panel) panel.hidden = true;
@@ -3966,7 +4136,7 @@ function openDataSourceSettings() {
                     }
                     const modal = document.getElementById('image-preview-modal');
                     if (modal && !modal.hidden) {
-                        modal.hidden = true;
+                        closeImagePreview();
                         event.preventDefault();
                         return;
                     }
@@ -4467,6 +4637,7 @@ function openDataSourceSettings() {
 
         async function boot() {
             bindEvents();
+            bindImagePreviewZoomEvents();
             updateFeishuSourceLabel();
             startTopStatusTicker();
             ensureReviewWriteTimer();
