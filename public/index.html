@@ -703,6 +703,36 @@
         .thumb-strip-mini img:hover {
             border-color: #5c82ff;
         }
+        .thumb-strip-mini img.hover-magnifying {
+            border-color: #ff4d4f;
+            box-shadow: 0 0 0 2px rgba(255, 77, 79, .35);
+        }
+        .hero-stage .hover-magnifier-view {
+            position: absolute;
+            inset: 0;
+            z-index: 2;
+            border-radius: inherit;
+            background-repeat: no-repeat;
+            background-color: #f5f7fb;
+            pointer-events: none;
+            display: none;
+        }
+        .hero-stage.is-hover-magnifying .hover-magnifier-view {
+            display: block;
+        }
+        .hero-stage.is-hover-magnifying > img {
+            opacity: 0;
+        }
+        .thumb-zoom-lens {
+            position: fixed;
+            z-index: 5000;
+            border: 2px solid #ff4d4f;
+            border-radius: 4px;
+            background: rgba(255, 77, 79, .10);
+            box-shadow: 0 0 0 1px rgba(255, 255, 255, .35);
+            pointer-events: none;
+            display: none;
+        }
         .review-thumb-wrap,
         .spec-thumb-wrap {
             position: relative;
@@ -1655,6 +1685,16 @@
             originX: 0,
             originY: 0,
             bound: false,
+        };
+        const thumbHoverMagnifier = {
+            active: false,
+            thumb: null,
+            hero: null,
+            stage: null,
+            originalSrc: '',
+            originalPreviewUrl: '',
+            bound: false,
+            zoom: 6,
         };
 
 
@@ -3825,6 +3865,211 @@ function openDataSourceSettings() {
             return Math.max(min, Math.min(max, Number(value) || 0));
         }
 
+        function getThumbHoverLens() {
+            let lens = document.getElementById('thumb-hover-zoom-lens');
+            if (!lens) {
+                lens = document.createElement('div');
+                lens.id = 'thumb-hover-zoom-lens';
+                lens.className = 'thumb-zoom-lens';
+                document.body.appendChild(lens);
+            }
+            return lens;
+        }
+
+        function getHoverMagnifierView(stage) {
+            if (!stage) return null;
+            let view = stage.querySelector('.hover-magnifier-view');
+            if (!view) {
+                view = document.createElement('div');
+                view.className = 'hover-magnifier-view';
+                stage.appendChild(view);
+            }
+            return view;
+        }
+
+        function isReviewThumbForHover(target) {
+            if (!(target instanceof Element)) return null;
+            return target.closest('.review-thumb-wrap .thumb-mini[data-hero-url]');
+        }
+
+        function getContainedImageRect(containerRect, naturalWidth, naturalHeight) {
+            const cw = containerRect.width || 1;
+            const ch = containerRect.height || 1;
+            const iw = naturalWidth || cw;
+            const ih = naturalHeight || ch;
+            const scale = Math.min(cw / iw, ch / ih);
+            const width = iw * scale;
+            const height = ih * scale;
+            return {
+                x: (cw - width) / 2,
+                y: (ch - height) / 2,
+                width,
+                height
+            };
+        }
+
+        function getElementContainedImageRect(element, naturalWidth, naturalHeight) {
+            const rect = element.getBoundingClientRect();
+            const inner = getContainedImageRect(rect, naturalWidth, naturalHeight);
+            return {
+                left: rect.left + inner.x,
+                top: rect.top + inner.y,
+                right: rect.left + inner.x + inner.width,
+                bottom: rect.top + inner.y + inner.height,
+                width: inner.width,
+                height: inner.height,
+                x: inner.x,
+                y: inner.y,
+                outer: rect
+            };
+        }
+
+        function startThumbHoverMagnifier(thumb, event) {
+            if (!thumb) return;
+            const imagePanel = thumb.closest('.image-panel');
+            const stage = imagePanel ? imagePanel.querySelector('.hero-stage') : null;
+            const hero = stage ? stage.querySelector('img') : null;
+            const url = thumb.getAttribute('data-hero-url');
+            if (!stage || !hero || !url) return;
+
+            if (thumbHoverMagnifier.thumb && thumbHoverMagnifier.thumb !== thumb) {
+                thumbHoverMagnifier.thumb.classList.remove('hover-magnifying');
+            }
+
+            thumbHoverMagnifier.active = true;
+            thumbHoverMagnifier.thumb = thumb;
+            thumbHoverMagnifier.hero = hero;
+            thumbHoverMagnifier.stage = stage;
+
+            thumb.classList.add('hover-magnifying');
+            stage.classList.add('is-hover-magnifying');
+
+            const view = getHoverMagnifierView(stage);
+            if (view) {
+                view.style.backgroundImage = `url("${String(url).replace(/"/g, '%22')}")`;
+            }
+
+            updateThumbHoverMagnifier(event);
+        }
+
+        function updateThumbHoverMagnifier(event) {
+            const thumb = thumbHoverMagnifier.thumb;
+            const stage = thumbHoverMagnifier.stage;
+            const hero = thumbHoverMagnifier.hero;
+            if (!thumbHoverMagnifier.active || !thumb || !stage || !hero || !event) return;
+
+            const stageRect = stage.getBoundingClientRect();
+            if (!stageRect.width || !stageRect.height) return;
+
+            const zoom = thumbHoverMagnifier.zoom || 6;
+
+            // 统一使用当前小图这张图的自然尺寸，避免 hero 仍是上一张图时比例错误。
+            const naturalWidth = thumb.naturalWidth || hero.naturalWidth || stageRect.width;
+            const naturalHeight = thumb.naturalHeight || hero.naturalHeight || stageRect.height;
+            if (!naturalWidth || !naturalHeight) return;
+
+            // 小图真实图片区域：排除 object-fit: contain 产生的左右/上下白边。
+            const thumbImageRect = getElementContainedImageRect(thumb, naturalWidth, naturalHeight);
+            if (!thumbImageRect.width || !thumbImageRect.height) return;
+
+            // 大图真实展示区域：用 hero 实际展示尺寸计算，不再猜 stage contain 尺寸。
+            // 这样红框范围和大图 overlay 的可视区域用的是同一套尺寸，才能严格同步。
+            const heroImageRect = getElementContainedImageRect(hero, naturalWidth, naturalHeight);
+            const heroDisplayWidth = heroImageRect.width || stageRect.width;
+            const heroDisplayHeight = heroImageRect.height || stageRect.height;
+
+            // 大图 overlay 覆盖整个 hero-stage，因此可视窗口大小是 stageRect。
+            // 把这个可视窗口反推到“放大后的大图”上，再映射回小图，这才是红框真实范围。
+            const viewNormW = clampNumber(stageRect.width / (heroDisplayWidth * zoom), 0.02, 1);
+            const viewNormH = clampNumber(stageRect.height / (heroDisplayHeight * zoom), 0.02, 1);
+
+            const pointerNormX = clampNumber((event.clientX - thumbImageRect.left) / thumbImageRect.width, 0, 1);
+            const pointerNormY = clampNumber((event.clientY - thumbImageRect.top) / thumbImageRect.height, 0, 1);
+
+            const maxNormX = Math.max(0, 1 - viewNormW);
+            const maxNormY = Math.max(0, 1 - viewNormH);
+            const viewNormX = clampNumber(pointerNormX - viewNormW / 2, 0, maxNormX);
+            const viewNormY = clampNumber(pointerNormY - viewNormH / 2, 0, maxNormY);
+
+            // 红框：表示当前大图区域实际展示的那一块原图范围。
+            const lens = getThumbHoverLens();
+            const lensW = thumbImageRect.width * viewNormW;
+            const lensH = thumbImageRect.height * viewNormH;
+            lens.style.display = 'block';
+            lens.style.width = `${lensW}px`;
+            lens.style.height = `${lensH}px`;
+            lens.style.left = `${thumbImageRect.left + thumbImageRect.width * viewNormX}px`;
+            lens.style.top = `${thumbImageRect.top + thumbImageRect.height * viewNormY}px`;
+
+            // 大图 overlay：用同一个 viewNormX/Y 显示局部，红框和大图完全同步。
+            const zoomedWidth = heroDisplayWidth * zoom;
+            const zoomedHeight = heroDisplayHeight * zoom;
+            const bgX = -viewNormX * zoomedWidth;
+            const bgY = -viewNormY * zoomedHeight;
+
+            const view = getHoverMagnifierView(stage);
+            if (view) {
+                view.style.backgroundSize = `${zoomedWidth}px ${zoomedHeight}px`;
+                view.style.backgroundPosition = `${bgX}px ${bgY}px`;
+            }
+        }
+
+        function stopThumbHoverMagnifier() {
+            if (!thumbHoverMagnifier.active) return;
+
+            const thumb = thumbHoverMagnifier.thumb;
+            const stage = thumbHoverMagnifier.stage;
+            const lens = document.getElementById('thumb-hover-zoom-lens');
+
+            if (thumb) thumb.classList.remove('hover-magnifying');
+            if (stage) stage.classList.remove('is-hover-magnifying');
+            if (lens) lens.style.display = 'none';
+
+            thumbHoverMagnifier.active = false;
+            thumbHoverMagnifier.thumb = null;
+            thumbHoverMagnifier.hero = null;
+            thumbHoverMagnifier.stage = null;
+        }
+
+        function bindThumbHoverMagnifierEvents() {
+            if (thumbHoverMagnifier.bound) return;
+            thumbHoverMagnifier.bound = true;
+
+            document.addEventListener('mouseover', event => {
+                const thumb = isReviewThumbForHover(event.target);
+                if (!thumb) return;
+                startThumbHoverMagnifier(thumb, event);
+            });
+
+            document.addEventListener('mousemove', event => {
+                const thumb = isReviewThumbForHover(event.target);
+                if (thumb) {
+                    if (!thumbHoverMagnifier.active || thumbHoverMagnifier.thumb !== thumb) {
+                        startThumbHoverMagnifier(thumb, event);
+                    } else {
+                        updateThumbHoverMagnifier(event);
+                    }
+                    return;
+                }
+
+                if (thumbHoverMagnifier.active) {
+                    stopThumbHoverMagnifier();
+                }
+            });
+
+            document.addEventListener('mouseout', event => {
+                const thumb = isReviewThumbForHover(event.target);
+                if (!thumb || thumb !== thumbHoverMagnifier.thumb) return;
+                const next = event.relatedTarget;
+                if (next instanceof Element && thumb.contains(next)) return;
+                stopThumbHoverMagnifier();
+            });
+
+            window.addEventListener('scroll', () => {
+                if (thumbHoverMagnifier.active) stopThumbHoverMagnifier();
+            }, true);
+        }
+
         function applyImagePreviewTransform() {
             const img = document.getElementById('preview-modal-img');
             const toolbar = document.getElementById('image-zoom-toolbar');
@@ -4052,6 +4297,11 @@ function openDataSourceSettings() {
                     if (hero && url) {
                         hero.src = url;
                         hero.dataset.previewUrl = url;
+                        if (thumbHoverMagnifier.active && thumbHoverMagnifier.hero === hero) {
+                            const stage = hero.closest('.hero-stage');
+                            const view = stage ? stage.querySelector('.hover-magnifier-view') : null;
+                            if (view) view.style.backgroundImage = `url("${String(url).replace(/"/g, '%22')}")`;
+                        }
                     }
                     return;
                 }
@@ -4638,6 +4888,7 @@ function openDataSourceSettings() {
         async function boot() {
             bindEvents();
             bindImagePreviewZoomEvents();
+            bindThumbHoverMagnifierEvents();
             updateFeishuSourceLabel();
             startTopStatusTicker();
             ensureReviewWriteTimer();
